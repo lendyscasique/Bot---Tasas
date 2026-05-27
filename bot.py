@@ -59,6 +59,10 @@ def get_bcv():
                 usd = float(item.get("promedio", 0))
             if item.get("fuente") == "euro_oficial":
                 eur = float(item.get("promedio", 0))
+        if not eur:
+            url2 = "https://ve.dolarapi.com/v1/dolares/euro"
+            data2 = requests.get(url2, timeout=10).json()
+            eur = float(data2.get("promedio", 0)) or None
         return usd, eur
     except:
         return None, None
@@ -83,6 +87,9 @@ def check_western_command():
     except:
         pass
 
+def fmt(valor, decimales=2):
+    return f"{valor:,.{decimales}f}"
+
 def main():
     while True:
         check_western_command()
@@ -92,36 +99,29 @@ def main():
         bcv_usd, bcv_eur = get_bcv()
         ahora = datetime.datetime.now().strftime("%d/%m/%Y — %I:%M %p")
 
-        msg = f"📊 *RESUMEN DE TASAS DE CAMBIO*\n"
+        msg  = f"📊 *RESUMEN DE TASAS*\n"
         msg += f"📅 {ahora}\n"
         msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
         msg += f"🌎 *TASAS OFICIALES*\n\n"
-        msg += "```\n"
 
-        filas = []
         if trm:
-            filas.append(("TRM", f"{trm:,.2f} COP"))
+            msg += f"🇨🇴  *TRM*\n      `{fmt(trm)} COP`\n\n"
         if bcv_usd:
-            filas.append(("USD/BCV", f"{bcv_usd:,.2f} Bs"))
+            msg += f"🏦  *USD/BCV*\n      `{fmt(bcv_usd)} Bs`\n\n"
         if bcv_eur:
-            filas.append(("EUR/BCV", f"{bcv_eur:,.2f} Bs"))
+            msg += f"🏦  *EUR/BCV*\n      `{fmt(bcv_eur)} Bs`\n\n"
         if bs_venta:
-            filas.append(("Binance Venta", f"{bs_venta:,.2f} Bs"))
+            msg += f"🔵  *Binance Venta*\n      `{fmt(bs_venta)} Bs`\n\n"
         if bs_compra:
-            filas.append(("Binance Compra", f"{bs_compra:,.2f} Bs"))
+            msg += f"🔵  *Binance Compra*\n      `{fmt(bs_compra)} Bs`\n\n"
         if usd_clp:
-            filas.append(("Dolar Observado", f"{usd_clp:,.2f} CLP"))
+            msg += f"🇨🇱  *Dólar Observado*\n      `{fmt(usd_clp)} CLP`\n\n"
         if western_rate:
-            filas.append(("Western Union", f"{western_rate:,.4f} CLP/COP"))
+            msg += f"🌍  *Western Unión*\n      `{fmt(western_rate, 4)} CLP/COP`\n\n"
         else:
-            filas.append(("Western Union", "Enviar /western TASA"))
+            msg += f"🌍  *Western Unión*\n      _Envía /western TASA_\n\n"
 
-        ancho = max(len(f[0]) for f in filas) + 2
-        for nombre, valor in filas:
-            msg += f"{nombre:<{ancho}}{valor}\n"
-
-        msg += "```\n"
-        msg += "━━━━━━━━━━━━━━━━━━━━"
+        msg += f"━━━━━━━━━━━━━━━━━━━━"
 
         enviar_telegram(msg)
         time.sleep(1800)
