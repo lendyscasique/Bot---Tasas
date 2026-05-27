@@ -17,6 +17,7 @@ MARGEN_BS = 30
 SPREAD_CLP = 50
 
 western_rate = None
+last_update_id = None  # ← para marcar updates como leídos
 
 def get_binance_usdt_bs():
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
@@ -26,7 +27,7 @@ def get_binance_usdt_bs():
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=10)
             prices = [float(ad["adv"]["price"]) for ad in r.json()["data"][:3]]
-            return round(sum(prices)/len(prices),2)
+            return round(sum(prices)/len(prices), 2)
         except:
             return None
     return fetch_side("BUY"), fetch_side("SELL")
@@ -69,62 +70,94 @@ def get_bcv():
 
 def enviar_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"Markdown"}, timeout=10)
+    requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
 
-def check_western_command():
-    global western_rate
+def construir_mensaje(bs_compra, bs_venta, usd_clp, trm, bcv_usd, bcv_eur):
+    ahora = datetime.datetime.now().strftime("%d/%m/%Y — %I:%M %p")
+    msg  = f"📊 *RESUMEN DE TASAS*\n"
+    msg += f"📅 {ahora}\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"🌎 *TASAS OFICIALES*\n\n"
+    if trm:
+        msg += f"🇨🇴  *TRM*\n      `{fmt(trm)} COP`\n\n"
+    if bcv_usd:
+        msg += f"🏦  *USD/BCV*\n      `{fmt(bcv_usd)} Bs`\n\n"
+    if bcv_eur:
+        msg += f"🏦  *EUR/BCV*\n      `{fmt(bcv_eur)} Bs`\n\n"
+    if bs_venta:
+        msg += f"🔵  *Binance Venta*\n      `{fmt(bs_venta)} Bs`\n\n"
+    if bs_compra:
+        msg += f"🔵  *Binance Compra*\n      `{fmt(bs_compra)} Bs`\n\n"
+    if usd_clp:
+        msg += f"🇨🇱  *Dólar Observado*\n      `{fmt(usd_clp)} CLP`\n\n"
+    if western_rate:
+        msg += f"🌍  *Western Unión*\n      `{fmt(western_rate, 4)} CLP/COP`\n\n"
+    else:
+        msg += f"🌍  *Western Unión*\n      _Envía /western TASA_\n\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━"
+    return msg
+
+def check_commands():
+    """Revisa comandos nuevos. Retorna True si se pidió /tasas."""
+    global western_rate, last_update_id
+    pedir_tasas = False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-        data = requests.get(url, timeout=10).json()
-        for update in reversed(data.get("result", [])):
-            msg = update.get("message", {}).get("text", "")
-            if msg.lower().startswith("/western "):
-                try:
-                    western_rate = float(msg.split()[1].replace(",","."))
-                except:
-                    pass
-                break
-    except:
-        pass
+        params = {"timeout": 0}
+        if last_update_id:
+            params["offset"] = last_update_id + 1  # ← marca anteriores como leídos
+
+        data = requests.get(url, params=params, timeout=10).json()
+        updates = data.get("result", [])
+
+        for update in updates:
+            last_update_id = update["update_id"]  # ← siempre avanzar
+            text = (update.get("message", {}).get("text", "") or "").strip()
+
+            if text.lower().startswith("/western"):
+                parts = text.split()
+                if len(parts) >= 2:
+                    try:
+                        western_rate = float(parts[1].replace(",", "."))
+                        enviar_telegram(f"✅ *Western Unión actualizada:* `{fmt(western_rate, 4)} CLP/COP`")
+                        print(f"✅ Western actualizado: {western_rate}")
+                    except ValueError:
+                        enviar_telegram("⚠️ Formato inválido. Usa: `/western 4.1377`")
+                else:
+                    enviar_telegram("⚠️ Debes indicar la tasa. Ejemplo: `/western 4.1377`")
+
+            elif text.lower() == "/tasas":
+                pedir_tasas = True
+                print("📊 /tasas solicitado")
+
+    except Exception as e:
+        print(f"Error en check_commands: {e}")
+
+    return pedir_tasas
 
 def fmt(valor, decimales=2):
     return f"{valor:,.{decimales}f}"
 
 def main():
+    ultimo_envio = 0  # timestamp del último envío automático
+
     while True:
-        check_western_command()
-        bs_compra, bs_venta = get_binance_usdt_bs()
-        usd_clp = get_dolar_observado()
-        trm = get_trm()
-        bcv_usd, bcv_eur = get_bcv()
-        ahora = datetime.datetime.now().strftime("%d/%m/%Y — %I:%M %p")
+        pedir_tasas = check_commands()
+        ahora = time.time()
 
-        msg  = f"📊 *RESUMEN DE TASAS*\n"
-        msg += f"📅 {ahora}\n"
-        msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        msg += f"🌎 *TASAS OFICIALES*\n\n"
+        # Enviar si se pidió /tasas O si pasaron 30 minutos
+        if pedir_tasas or (ahora - ultimo_envio) >= 1800:
+            bs_compra, bs_venta = get_binance_usdt_bs()
+            usd_clp = get_dolar_observado()
+            trm = get_trm()
+            bcv_usd, bcv_eur = get_bcv()
 
-        if trm:
-            msg += f"🇨🇴  *TRM*\n      `{fmt(trm)} COP`\n\n"
-        if bcv_usd:
-            msg += f"🏦  *USD/BCV*\n      `{fmt(bcv_usd)} Bs`\n\n"
-        if bcv_eur:
-            msg += f"🏦  *EUR/BCV*\n      `{fmt(bcv_eur)} Bs`\n\n"
-        if bs_venta:
-            msg += f"🔵  *Binance Venta*\n      `{fmt(bs_venta)} Bs`\n\n"
-        if bs_compra:
-            msg += f"🔵  *Binance Compra*\n      `{fmt(bs_compra)} Bs`\n\n"
-        if usd_clp:
-            msg += f"🇨🇱  *Dólar Observado*\n      `{fmt(usd_clp)} CLP`\n\n"
-        if western_rate:
-            msg += f"🌍  *Western Unión*\n      `{fmt(western_rate, 4)} CLP/COP`\n\n"
-        else:
-            msg += f"🌍  *Western Unión*\n      _Envía /western TASA_\n\n"
+            msg = construir_mensaje(bs_compra, bs_venta, usd_clp, trm, bcv_usd, bcv_eur)
+            enviar_telegram(msg)
+            ultimo_envio = ahora
+            print(f"📤 Resumen enviado — {datetime.datetime.now().strftime('%H:%M:%S')}")
 
-        msg += f"━━━━━━━━━━━━━━━━━━━━"
-
-        enviar_telegram(msg)
-        time.sleep(1800)
+        time.sleep(10)  # ← revisa comandos cada 10 segundos
 
 if __name__ == "__main__":
     main()
