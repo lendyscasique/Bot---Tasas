@@ -31,13 +31,9 @@ def get_binance_usdt_bs():
 
 def get_dolar_observado():
     try:
-        hoy = datetime.date.today().strftime("%Y-%m-%d")
-        ayer = (datetime.date.today()-datetime.timedelta(days=5)).strftime("%Y-%m-%d")
-        url = f"https://si3.bcentral.cl/SieteRestWS/SieteRestWS.ashx?user=&pass=&firstdate={ayer}&lastdate={hoy}&timeseries=F073.TCO.PRE.Z.D&function=GetSeries"
+        url = "https://mindicador.cl/api/dolar"
         data = requests.get(url, timeout=10).json()
-        for e in reversed(data["Series"]["Obs"]):
-            if e["value"] not in ("", None):
-                return float(e["value"])
+        return float(data["serie"][0]["valor"])
     except:
         return None
 
@@ -52,14 +48,16 @@ def get_trm():
 
 def get_bcv():
     try:
-        from bs4 import BeautifulSoup
-        r = requests.get("https://www.bcv.org.ve/", timeout=10, headers={"User-Agent":"Mozilla/5.0"})
-        soup = BeautifulSoup(r.text, "html.parser")
-        dolar = soup.find("div", id="dolar")
-        euro = soup.find("div", id="euro")
-        d = float(dolar.find("strong").text.strip().replace(",",".")) if dolar else None
-        e = float(euro.find("strong").text.strip().replace(",",".")) if euro else None
-        return d, e
+        url = "https://ve.dolarapi.com/v1/dolares"
+        data = requests.get(url, timeout=10).json()
+        usd = None
+        eur = None
+        for item in data:
+            if item.get("fuente") == "oficial":
+                usd = float(item.get("promedio", 0))
+            if item.get("fuente") == "euro_oficial":
+                eur = float(item.get("promedio", 0))
+        return usd, eur
     except:
         return None, None
 
@@ -74,7 +72,7 @@ def check_western_command():
         data = requests.get(url, timeout=10).json()
         for update in reversed(data.get("result", [])):
             msg = update.get("message", {}).get("text", "")
-            if msg.startswith("/western "):
+            if msg.lower().startswith("/western "):
                 try:
                     western_rate = float(msg.split()[1])
                 except:
@@ -112,7 +110,6 @@ def main():
 
         lineas.append("\n━━━ GSA CAMBIOS — GIROS ━━━\n")
         if bs_compra and bs_venta and usd_clp:
-            tasa_bs = round(((bs_venta+bs_compra)/2)-MARGEN_BS, 2)
             limite = (bs_venta*(1+FEE_USDT_BS))/(usd_clp*(1+FEE_USDT_CLP))
             clp_bs = round(limite*(1-FEE_CLP_BS), 6)
             bs_clp = round(limite*(1+FEE_BS_CLP), 6)
