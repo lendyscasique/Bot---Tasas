@@ -51,13 +51,26 @@ def get_trm():
 
 def get_bcv():
     try:
-        r = requests.get("https://pydolarve.org/api/v1/dollar?page=bcv", timeout=10)
+        r = requests.get("https://ve.dolarapi.com/v1/dolares/oficiales", timeout=10)
         data = r.json()
-        usd = float(data["monitors"]["usd"]["price"])
-        eur = float(data["monitors"]["eur"]["price"])
+        usd = None
+        eur = None
+        for item in data:
+            moneda = item.get("moneda", "").lower()
+            if moneda == "usd":
+                usd = float(item.get("promedio", 0))
+            elif moneda == "eur":
+                eur = float(item.get("promedio", 0))
         return usd, eur
     except:
-        return None, None
+        try:
+            r = requests.get("https://api.bcv.org.ve/v1/tipos-de-cambio", timeout=10)
+            data = r.json()
+            usd = float(data.get("USD", 0)) or None
+            eur = float(data.get("EUR", 0)) or None
+            return usd, eur
+        except:
+            return None, None
 
 def fmt(valor, decimales=2):
     return f"{valor:,.{decimales}f}"
