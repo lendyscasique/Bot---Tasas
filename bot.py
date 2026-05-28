@@ -22,7 +22,7 @@ last_update_id = None
 def get_binance(fiat):
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json"}
-    def fetch_side(side, pay_types=None, max_amount=None):
+    def fetch_side(side):
         payload = {
             "asset": "USDT",
             "fiat": fiat,
@@ -31,14 +31,11 @@ def get_binance(fiat):
             "publisherType": None,
             "rows": 10,
             "tradeType": side,
-            "payTypes": pay_types or []
+            "payTypes": []
         }
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=10)
-            ads = r.json()["data"]
-            if max_amount:
-                ads = [ad for ad in ads if float(ad["adv"]["minSingleTransAmount"]) <= max_amount]
-            ads = ads[:3]
+            ads = r.json()["data"][:3]
             prices = [float(ad["adv"]["price"]) for ad in ads]
             return round(sum(prices)/len(prices), 2) if prices else None
         except:
@@ -80,9 +77,7 @@ def get_bybit_cop():
             items = r.json()["result"]["items"][:3]
             prices = [float(item["price"]) for item in items]
             return round(sum(prices)/len(prices), 2)
-        compra = fetch_side("1")
-        venta = fetch_side("0")
-        return compra, venta
+        return fetch_side("1"), fetch_side("0")
     except:
         return None, None
 
@@ -130,7 +125,7 @@ def enviar_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
 
-def construir_mensaje(bs_compra, bs_venta, clp_compra, clp_venta, cop_compra, cop_venta, bybit_compra, bybit_venta, usd_clp, trm, bcv_usd, bcv_eur):
+def construir_mensaje(bs_compra, bs_venta, ban_compra, ban_venta, clp_compra, clp_venta, cop_compra, cop_venta, bybit_compra, bybit_venta, usd_clp, trm, bcv_usd, bcv_eur):
     ahora = datetime.datetime.now().strftime("%d/%m/%Y — %I:%M %p")
 
     msg  = f"📊 *RESUMEN DE TASAS*\n"
@@ -161,10 +156,14 @@ def construir_mensaje(bs_compra, bs_venta, clp_compra, clp_venta, cop_compra, co
     else:
         msg += f"🌍  *Western Unión*\n      _Envía /western TASA_\n\n"
 
+    # Usar tasa Banesco si disponible, sino tasa general
+    bs_venta_calc = ban_venta if ban_venta else bs_venta
+    bs_compra_calc = ban_compra if ban_compra else bs_compra
+
     limite_clp_bs = None
     limite_clp_cop = None
-    if bs_compra and bs_venta and usd_clp:
-        limite_clp_bs = (bs_venta * (1 - FEE_USDT_BS)) / (usd_clp * (1 + FEE_USDT_CLP))
+    if bs_compra_calc and bs_venta_calc and usd_clp:
+        limite_clp_bs = (bs_venta_calc * (1 - FEE_USDT_BS)) / (usd_clp * (1 + FEE_USDT_CLP))
     if western_rate:
         limite_clp_cop = western_rate * (1 - FEE_WU)
 
@@ -190,9 +189,9 @@ def construir_mensaje(bs_compra, bs_venta, clp_compra, clp_venta, cop_compra, co
 
     msg += f"📌 *Compra / Venta Bolívares*\n\n"
 
-    if bs_compra and bs_venta:
-        usd_bs_compra = round(((bs_venta + bs_compra) / 2) - MARGEN_BS, 2)
-        msg += f"🔵  USD → Bs\n      `{fmt(bs_venta)} Bs`\n\n"
+    if bs_compra_calc and bs_venta_calc:
+        usd_bs_compra = round(((bs_venta_calc + bs_compra_calc) / 2) - MARGEN_BS, 2)
+        msg += f"🔵  USD → Bs\n      `{fmt(bs_venta_calc)} Bs`\n\n"
         msg += f"🔵  Bs → USD\n      `{fmt(usd_bs_compra)} Bs`\n\n"
 
     if limite_clp_bs and limite_clp_cop:
@@ -260,13 +259,14 @@ def main():
         ahora = time.time()
         if pedir_tasas or (ahora - ultimo_envio) >= 1800:
             bs_compra, bs_venta = get_binance("VES")
+            ban_compra, ban_venta = get_binance_banesco()
             clp_compra, clp_venta = get_binance("CLP")
             cop_compra, cop_venta = get_binance("COP")
             bybit_compra, bybit_venta = get_bybit_cop()
             usd_clp = get_dolar_observado()
             trm = get_trm()
             bcv_usd, bcv_eur = get_bcv()
-            msg = construir_mensaje(bs_compra, bs_venta, clp_compra, clp_venta, cop_compra, cop_venta, bybit_compra, bybit_venta, usd_clp, trm, bcv_usd, bcv_eur)
+            msg = construir_mensaje(bs_compra, bs_venta, ban_compra, ban_venta, clp_compra, clp_venta, cop_compra, cop_venta, bybit_compra, bybit_venta, usd_clp, trm, bcv_usd, bcv_eur)
             enviar_telegram(msg)
             ultimo_envio = ahora
             print(f"Enviado — {datetime.datetime.now().strftime('%H:%M:%S')}")
