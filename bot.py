@@ -22,12 +22,50 @@ last_update_id = None
 def get_binance(fiat):
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json"}
-    def fetch_side(side):
-        payload = {"asset":"USDT","fiat":fiat,"merchantCheck":False,"page":1,"publisherType":None,"rows":5,"tradeType":side}
+    def fetch_side(side, pay_types=None, max_amount=None):
+        payload = {
+            "asset": "USDT",
+            "fiat": fiat,
+            "merchantCheck": False,
+            "page": 1,
+            "publisherType": None,
+            "rows": 10,
+            "tradeType": side,
+            "payTypes": pay_types or []
+        }
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=10)
-            prices = [float(ad["adv"]["price"]) for ad in r.json()["data"][:3]]
-            return round(sum(prices)/len(prices), 2)
+            ads = r.json()["data"]
+            if max_amount:
+                ads = [ad for ad in ads if float(ad["adv"]["minSingleTransAmount"]) <= max_amount]
+            ads = ads[:3]
+            prices = [float(ad["adv"]["price"]) for ad in ads]
+            return round(sum(prices)/len(prices), 2) if prices else None
+        except:
+            return None
+    return fetch_side("BUY"), fetch_side("SELL")
+
+def get_binance_banesco():
+    url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+    headers = {"Content-Type": "application/json"}
+    def fetch_side(side):
+        payload = {
+            "asset": "USDT",
+            "fiat": "VES",
+            "merchantCheck": False,
+            "page": 1,
+            "publisherType": None,
+            "rows": 20,
+            "tradeType": side,
+            "payTypes": ["Banesco"]
+        }
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=10)
+            ads = r.json()["data"]
+            ads = [ad for ad in ads if float(ad["adv"]["minSingleTransAmount"]) <= 1000]
+            ads = ads[:3]
+            prices = [float(ad["adv"]["price"]) for ad in ads]
+            return round(sum(prices)/len(prices), 2) if prices else None
         except:
             return None
     return fetch_side("BUY"), fetch_side("SELL")
@@ -108,6 +146,8 @@ def construir_mensaje(bs_compra, bs_venta, clp_compra, clp_venta, cop_compra, co
         msg += f"🏦  *EUR/BCV*\n      `{fmt(bcv_eur)} Bs`\n\n"
     if bs_venta:
         msg += f"🔵  *Binance USDT/Bs*\n      Venta: `{fmt(bs_venta)} Bs` | Compra: `{fmt(bs_compra)} Bs`\n\n"
+    if ban_venta:
+        msg += f"🟢  *Binance Banesco ≤1000*\n      Venta: `{fmt(ban_venta)} Bs` | Compra: `{fmt(ban_compra)} Bs`\n\n"
     if clp_venta:
         msg += f"🔵  *Binance USDT/CLP*\n      Venta: `{fmt(clp_venta)} CLP` | Compra: `{fmt(clp_compra)} CLP`\n\n"
     if cop_venta:
