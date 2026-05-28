@@ -19,11 +19,11 @@ SPREAD_CLP = 50
 western_rate = None
 last_update_id = None
 
-def get_binance_usdt_bs():
+def get_binance(fiat):
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json"}
     def fetch_side(side):
-        payload = {"asset":"USDT","fiat":"VES","merchantCheck":False,"page":1,"publisherType":None,"rows":5,"tradeType":side}
+        payload = {"asset":"USDT","fiat":fiat,"merchantCheck":False,"page":1,"publisherType":None,"rows":5,"tradeType":side}
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=10)
             prices = [float(ad["adv"]["price"]) for ad in r.json()["data"][:3]]
@@ -51,8 +51,8 @@ def get_trm():
 
 def get_bcv():
     try:
-        r = requests.get("https://ve.dolarapi.com/v1/dolares/oficiales", timeout=10)
-        data = r.json()
+        url = "https://ve.dolarapi.com/v1/dolares/oficiales"
+        data = requests.get(url, timeout=10).json()
         usd = None
         eur = None
         for item in data:
@@ -61,16 +61,13 @@ def get_bcv():
                 usd = float(item.get("promedio", 0))
             elif moneda == "eur":
                 eur = float(item.get("promedio", 0))
+        if not eur:
+            url2 = "https://ve.dolarapi.com/v1/dolares/euro"
+            data2 = requests.get(url2, timeout=10).json()
+            eur = float(data2.get("promedio", 0)) or None
         return usd, eur
     except:
-        try:
-            r = requests.get("https://api.bcv.org.ve/v1/tipos-de-cambio", timeout=10)
-            data = r.json()
-            usd = float(data.get("USD", 0)) or None
-            eur = float(data.get("EUR", 0)) or None
-            return usd, eur
-        except:
-            return None, None
+        return None, None
 
 def fmt(valor, decimales=2):
     return f"{valor:,.{decimales}f}"
@@ -79,7 +76,7 @@ def enviar_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
 
-def construir_mensaje(bs_compra, bs_venta, usd_clp, trm, bcv_usd, bcv_eur):
+def construir_mensaje(bs_compra, bs_venta, clp_compra, clp_venta, cop_compra, cop_venta, usd_clp, trm, bcv_usd, bcv_eur):
     ahora = datetime.datetime.now().strftime("%d/%m/%Y — %I:%M %p")
 
     msg  = f"📊 *RESUMEN DE TASAS*\n"
@@ -94,9 +91,11 @@ def construir_mensaje(bs_compra, bs_venta, usd_clp, trm, bcv_usd, bcv_eur):
     if bcv_eur:
         msg += f"🏦  *EUR/BCV*\n      `{fmt(bcv_eur)} Bs`\n\n"
     if bs_venta:
-        msg += f"🔵  *Binance Venta*\n      `{fmt(bs_venta)} Bs`\n\n"
-    if bs_compra:
-        msg += f"🔵  *Binance Compra*\n      `{fmt(bs_compra)} Bs`\n\n"
+        msg += f"🔵  *Binance USDT/Bs*\n      Venta: `{fmt(bs_venta)} Bs` | Compra: `{fmt(bs_compra)} Bs`\n\n"
+    if clp_venta:
+        msg += f"🔵  *Binance USDT/CLP*\n      Venta: `{fmt(clp_venta)} CLP` | Compra: `{fmt(clp_compra)} CLP`\n\n"
+    if cop_venta:
+        msg += f"🔵  *Binance USDT/COP*\n      Venta: `{fmt(cop_venta)} COP` | Compra: `{fmt(cop_compra)} COP`\n\n"
     if usd_clp:
         msg += f"🇨🇱  *Dólar Observado*\n      `{fmt(usd_clp)} CLP`\n\n"
     if western_rate:
@@ -106,18 +105,16 @@ def construir_mensaje(bs_compra, bs_venta, usd_clp, trm, bcv_usd, bcv_eur):
 
     msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
     msg += f"💱 *GSA CAMBIOS*\n\n"
+    msg += f"📌 *Giros*\n\n"
 
     if bs_compra and bs_venta and usd_clp:
         limite_clp_bs = (bs_venta * (1 - FEE_USDT_BS)) / (usd_clp * (1 + FEE_USDT_CLP))
         clp_bs = round(limite_clp_bs * (1 - FEE_CLP_BS), 6)
         bs_clp = round(limite_clp_bs * (1 + FEE_BS_CLP), 6)
-        tasa_bs = round(((bs_venta + bs_compra) / 2) - MARGEN_BS, 2)
-        msg += f"📌 *Giros*\n\n"
         msg += f"🇨🇱➡️🇻🇪  CLP → Bs\n      `{fmt(clp_bs, 6)}`\n\n"
         msg += f"🇻🇪➡️🇨🇱  Bs → CLP\n      `{fmt(bs_clp, 6)}`\n\n"
-        if usd_clp:
-            msg += f"🇨🇱➡️🇺🇸  CLP → USD\n      `{fmt(usd_clp + SPREAD_CLP)} CLP`\n\n"
-            msg += f"🇺🇸➡️🇨🇱  USD → CLP\n      `{fmt(usd_clp - SPREAD_CLP)} CLP`\n\n"
+        msg += f"🇨🇱➡️🇺🇸  CLP → USD\n      `{fmt(usd_clp + SPREAD_CLP)} CLP`\n\n"
+        msg += f"🇺🇸➡️🇨🇱  USD → CLP\n      `{fmt(usd_clp - SPREAD_CLP)} CLP`\n\n"
 
     if western_rate:
         limite_clp_cop = western_rate * (1 - FEE_WU)
@@ -127,12 +124,23 @@ def construir_mensaje(bs_compra, bs_venta, usd_clp, trm, bcv_usd, bcv_eur):
         msg += f"🇨🇴➡️🇨🇱  COP → CLP\n      `{fmt(cop_clp, 4)}`\n\n"
 
         if bs_compra and bs_venta and usd_clp:
-            limite_clp_bs = (bs_venta * (1 - FEE_USDT_BS)) / (usd_clp * (1 + FEE_USDT_CLP))
             limite_bs_cop = limite_clp_cop / limite_clp_bs
             bs_cop = round(limite_bs_cop * (1 - FEE_COP_BS), 4)
             cop_bs = round(limite_bs_cop * (1 + FEE_COP_BS), 4)
             msg += f"🇻🇪➡️🇨🇴  Bs → COP\n      `{fmt(bs_cop, 4)}`\n\n"
             msg += f"🇨🇴➡️🇻🇪  COP → Bs\n      `{fmt(cop_bs, 4)}`\n\n"
+
+    msg += f"📌 *Compra / Venta*\n\n"
+
+    if bs_compra and bs_venta:
+        usd_bs_compra = round(((bs_venta + bs_compra) / 2) - MARGEN_BS, 2)
+        usd_bs_venta = bs_venta
+        msg += f"💵  *USD/Bs*\n      Compra: `{fmt(usd_bs_compra)} Bs` | Venta: `{fmt(usd_bs_venta)} Bs`\n\n"
+
+    if cop_compra and cop_venta:
+        usd_cop_compra = round(((cop_venta + cop_compra) / 2) - (MARGEN_BS * (cop_venta / bs_venta if bs_venta else 1)), 2)
+        usd_cop_venta = cop_venta
+        msg += f"💵  *USD/COP*\n      Compra: `{fmt(usd_cop_compra)} COP` | Venta: `{fmt(usd_cop_venta)} COP`\n\n"
 
     msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
     msg += f"📐 *LÍMITES OPERATIVOS*\n\n"
@@ -144,7 +152,6 @@ def construir_mensaje(bs_compra, bs_venta, usd_clp, trm, bcv_usd, bcv_eur):
     if western_rate:
         limite_clp_cop = western_rate * (1 - FEE_WU)
         msg += f"🔴  *Límite CLP/COP*\n      `{fmt(limite_clp_cop, 4)}`\n\n"
-
         if bs_compra and bs_venta and usd_clp:
             limite_bs_cop = limite_clp_cop / limite_clp_bs
             msg += f"🔴  *Límite Bs/COP*\n      `{fmt(limite_bs_cop, 4)}`\n\n"
@@ -161,8 +168,7 @@ def check_commands():
         if last_update_id:
             params["offset"] = last_update_id + 1
         data = requests.get(url, params=params, timeout=10).json()
-        updates = data.get("result", [])
-        for update in updates:
+        for update in data.get("result", []):
             last_update_id = update["update_id"]
             text = (update.get("message", {}).get("text", "") or "").strip()
             if text.lower().startswith("/western"):
@@ -187,11 +193,13 @@ def main():
         pedir_tasas = check_commands()
         ahora = time.time()
         if pedir_tasas or (ahora - ultimo_envio) >= 1800:
-            bs_compra, bs_venta = get_binance_usdt_bs()
+            bs_compra, bs_venta = get_binance("VES")
+            clp_compra, clp_venta = get_binance("CLP")
+            cop_compra, cop_venta = get_binance("COP")
             usd_clp = get_dolar_observado()
             trm = get_trm()
             bcv_usd, bcv_eur = get_bcv()
-            msg = construir_mensaje(bs_compra, bs_venta, usd_clp, trm, bcv_usd, bcv_eur)
+            msg = construir_mensaje(bs_compra, bs_venta, clp_compra, clp_venta, cop_compra, cop_venta, usd_clp, trm, bcv_usd, bcv_eur)
             enviar_telegram(msg)
             ultimo_envio = ahora
             print(f"Enviado — {datetime.datetime.now().strftime('%H:%M:%S')}")
