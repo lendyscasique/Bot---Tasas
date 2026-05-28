@@ -37,15 +37,7 @@ def get_bybit_cop():
         url = "https://api2.bybit.com/fiat/otc/item/online"
         headers = {"Content-Type": "application/json"}
         def fetch_side(side):
-            payload = {
-                "tokenId": "USDT",
-                "currencyId": "COP",
-                "payment": [],
-                "side": side,
-                "size": "5",
-                "page": "1",
-                "amount": ""
-            }
+            payload = {"tokenId":"USDT","currencyId":"COP","payment":[],"side":side,"size":"5","page":"1","amount":""}
             r = requests.post(url, headers=headers, json=payload, timeout=10)
             items = r.json()["result"]["items"][:3]
             prices = [float(item["price"]) for item in items]
@@ -129,7 +121,6 @@ def construir_mensaje(bs_compra, bs_venta, clp_compra, clp_venta, cop_compra, co
     else:
         msg += f"🌍  *Western Unión*\n      _Envía /western TASA_\n\n"
 
-    # Calcular límites base
     limite_clp_bs = None
     limite_clp_cop = None
     if bs_compra and bs_venta and usd_clp:
@@ -161,24 +152,24 @@ def construir_mensaje(bs_compra, bs_venta, clp_compra, clp_venta, cop_compra, co
 
     if bs_compra and bs_venta:
         usd_bs_compra = round(((bs_venta + bs_compra) / 2) - MARGEN_BS, 2)
-        msg += f"🔵  USD → Bs *(Venta)*\n      `{fmt(bs_venta)} Bs`\n\n"
-        msg += f"🔵  Bs → USD *(Compra)*\n      `{fmt(usd_bs_compra)} Bs`\n\n"
+        msg += f"🔵  USD → Bs\n      `{fmt(bs_venta)} Bs`\n\n"
+        msg += f"🔵  Bs → USD\n      `{fmt(usd_bs_compra)} Bs`\n\n"
 
     if limite_clp_bs and limite_clp_cop:
         limite_bs_cop = limite_clp_cop / limite_clp_bs
-        cop_bs = round(limite_bs_cop * (1 + FEE_COP_BS), 4)
-        bs_cop = round(limite_bs_cop * (1 - FEE_COP_BS), 4)
-        msg += f"🔵  COP → Bs *(Venta)*\n      `{fmt(cop_bs, 4)}`\n\n"
-        msg += f"🔵  Bs → COP *(Compra)*\n      `{fmt(bs_cop, 4)}`\n\n"
+        cop_bs = round(limite_bs_cop * (1 - FEE_COP_BS), 4)
+        bs_cop = round(limite_bs_cop * (1 + FEE_COP_BS), 4)
+        msg += f"🔵  COP → Bs\n      `{fmt(cop_bs, 4)}`\n\n"
+        msg += f"🔵  Bs → COP\n      `{fmt(bs_cop, 4)}`\n\n"
 
     msg += f"📌 *Compra / Venta Pesos Colombianos*\n\n"
 
     if bybit_venta and bybit_compra:
-        msg += f"🟠  USD → COP *(Venta)*\n      `{fmt(bybit_venta)} COP`\n\n"
-        msg += f"🟠  COP → USD *(Compra)*\n      `{fmt(bybit_compra)} COP`\n\n"
+        msg += f"🟠  USD → COP\n      `{fmt(bybit_compra)} COP`\n\n"
+        msg += f"🟠  COP → USD\n      `{fmt(bybit_venta)} COP`\n\n"
     elif cop_venta and cop_compra:
-        msg += f"🔵  USD → COP *(Venta)*\n      `{fmt(cop_venta)} COP`\n\n"
-        msg += f"🔵  COP → USD *(Compra)*\n      `{fmt(cop_compra)} COP`\n\n"
+        msg += f"🔵  USD → COP\n      `{fmt(cop_compra)} COP`\n\n"
+        msg += f"🔵  COP → USD\n      `{fmt(cop_venta)} COP`\n\n"
 
     msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
     msg += f"📐 *LÍMITES OPERATIVOS*\n\n"
