@@ -134,6 +134,21 @@ def construir_mensaje(bs_compra, bs_venta, usd_clp, trm, bcv_usd, bcv_eur):
             msg += f"🇻🇪➡️🇨🇴  Bs → COP\n      `{fmt(bs_cop, 4)}`\n\n"
             msg += f"🇨🇴➡️🇻🇪  COP → Bs\n      `{fmt(cop_bs, 4)}`\n\n"
 
+    msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"📐 *LÍMITES OPERATIVOS*\n\n"
+
+    if bs_compra and bs_venta and usd_clp:
+        limite_clp_bs = (bs_venta * (1 - FEE_USDT_BS)) / (usd_clp * (1 + FEE_USDT_CLP))
+        msg += f"🔴  *Límite CLP/Bs*\n      `{fmt(limite_clp_bs, 6)}`\n\n"
+
+    if western_rate:
+        limite_clp_cop = western_rate * (1 - FEE_WU)
+        msg += f"🔴  *Límite CLP/COP*\n      `{fmt(limite_clp_cop, 4)}`\n\n"
+
+        if bs_compra and bs_venta and usd_clp:
+            limite_bs_cop = limite_clp_cop / limite_clp_bs
+            msg += f"🔴  *Límite Bs/COP*\n      `{fmt(limite_bs_cop, 4)}`\n\n"
+
     msg += f"━━━━━━━━━━━━━━━━━━━━"
     return msg
 
