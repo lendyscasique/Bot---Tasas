@@ -13,7 +13,6 @@ FEE_CLP_BS = 0.055
 FEE_BS_CLP = 0.055
 FEE_CLP_COP = 0.075
 FEE_COP_BS = 0.055
-FEE_BINANCE_P2P = 0.002
 MARGEN_BS = 30
 SPREAD_CLP = 50
 OBJETIVO_USDT_DIARIO = 5.0
@@ -24,11 +23,10 @@ SPREAD_PREMIUM = 20
 western_rate = None
 last_update_id = None
 
-# Estado P2P
 p2p_operaciones_hoy = []
 p2p_venta_abierta = None
 p2p_ganancia_hoy_bs = 0
-p2p_fees_hoy_bs = 0
+p2p_fees_hoy_usdt = 0
 p2p_ultimo_spread_alerta = 0
 p2p_ultima_fecha = None
 
@@ -137,17 +135,9 @@ def enviar_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
 
-def calcular_ganancia_p2p(usdt, precio_venta, precio_compra):
-    bs_recibidos = usdt * precio_venta * (1 - FEE_BINANCE_P2P)
-    bs_pagados = usdt * precio_compra * (1 + FEE_BINANCE_P2P)
-    ganancia_bs = bs_recibidos - bs_pagados
-    fees_bs = (usdt * precio_venta * FEE_BINANCE_P2P) + (usdt * precio_compra * FEE_BINANCE_P2P)
-    ganancia_usdt = ganancia_bs / precio_compra
-    return round(ganancia_bs, 2), round(fees_bs, 2), round(ganancia_usdt, 4)
-
 def usdt_ganados_hoy():
     total_bs = p2p_ganancia_hoy_bs
-    ban_compra, ban_venta = get_binance_banesco()
+    ban_compra, _ = get_binance_banesco()
     precio_ref = ban_compra if ban_compra else 737
     return round(total_bs / precio_ref, 4) if precio_ref else 0
 
@@ -156,32 +146,23 @@ def resumen_diario():
     progreso = min(100, round((usdt_hoy / OBJETIVO_USDT_DIARIO) * 100, 1))
     barra = "█" * int(progreso / 10) + "░" * (10 - int(progreso / 10))
     msg  = f"📈 *RESUMEN DEL DÍA*\n\n"
-    msg += f"Rotaciones:       {len(p2p_operaciones_hoy)}\n"
-    msg += f"Ganancia bruta:   {fmt(p2p_ganancia_hoy_bs + p2p_fees_hoy_bs)} Bs\n"
-    msg += f"Fees Binance:     {fmt(p2p_fees_hoy_bs)} Bs\n"
-    msg += f"Ganancia neta:    {fmt(p2p_ganancia_hoy_bs)} Bs\n"
-    msg += f"En USDT:          ~{fmt(usdt_hoy, 4)} USDT\n\n"
-    msg += f"Objetivo {OBJETIVO_USDT_DIARIO} USDT: {progreso}%\n"
+    msg += f"Rotaciones:        {len(p2p_operaciones_hoy)}\n"
+    msg += f"Ganancia neta:     `{fmt(p2p_ganancia_hoy_bs)} Bs`\n"
+    msg += f"Fees totales:      `{fmt(p2p_fees_hoy_usdt, 4)} USDT`\n"
+    msg += f"Ganancia en USDT:  `~{fmt(usdt_hoy, 4)} USDT`\n\n"
+    msg += f"🎯 Objetivo {OBJETIVO_USDT_DIARIO} USDT: {progreso}%\n"
     msg += f"`{barra}`\n"
     return msg
 
 def analizar_spread_p2p(ban_compra, ban_venta):
-    global p2p_ultimo_spread_alerta, p2p_ultima_fecha
-
-    hoy = datetime.date.today()
-    if p2p_ultima_fecha != hoy:
-        p2p_ultima_fecha = hoy
+    global p2p_ultimo_spread_alerta
 
     if not ban_compra or not ban_venta:
         return
 
     spread = round(ban_venta - ban_compra, 2)
-    usdt_hoy = usdt_ganados_hoy()
-    falta = max(0, OBJETIVO_USDT_DIARIO - usdt_hoy)
-
     if spread < SPREAD_MINIMO:
         return
-
     if spread == p2p_ultimo_spread_alerta:
         return
 
@@ -195,20 +176,30 @@ def analizar_spread_p2p(ban_compra, ban_venta):
         emoji = "🟡"
         nivel = "MODERADO"
 
-    ganancia_bs, fees_bs, ganancia_usdt = calcular_ganancia_p2p(100, ban_venta, ban_compra)
+    usdt_hoy = usdt_ganados_hoy()
+    falta = max(0, OBJETIVO_USDT_DIARIO - usdt_hoy)
+
+    # Ganancia estimada por 100 USDT
+    usdt_netos = 100 * (1 - 0.0025)
+    bs_recibidos = usdt_netos * ban_venta
+    bs_pagados = 100 * ban_compra
+    fee_estimado = 0.05
+    ganancia_bs = bs_recibidos - bs_pagados - (fee_estimado * ban_compra)
+    ganancia_usdt = round(ganancia_bs / ban_compra, 4)
 
     msg  = f"{emoji} *SEÑAL P2P — {nivel}*\n\n"
-    msg += f"Spread actual:    `{fmt(spread)} Bs`\n"
-    msg += f"Venta mercado:    `{fmt(ban_venta)} Bs`\n"
-    msg += f"Compra mercado:   `{fmt(ban_compra)} Bs`\n\n"
-    msg += f"📊 *Por 100 USDT:*\n"
-    msg += f"  Ganancia neta:  `{fmt(ganancia_bs)} Bs`\n"
-    msg += f"  Fees Binance:   `{fmt(fees_bs)} Bs`\n"
-    msg += f"  En USDT:        `~{fmt(ganancia_usdt, 4)} USDT`\n\n"
+    msg += f"Spread actual:     `{fmt(spread)} Bs`\n"
+    msg += f"Venta mercado:     `{fmt(ban_venta)} Bs`\n"
+    msg += f"Compra mercado:    `{fmt(ban_compra)} Bs`\n\n"
+    msg += f"📊 *Estimado 100 USDT:*\n"
+    msg += f"  Bs recibidos:    `{fmt(bs_recibidos)} Bs`\n"
+    msg += f"  Bs pagados:      `{fmt(bs_pagados)} Bs`\n"
+    msg += f"  Ganancia neta:   `{fmt(ganancia_bs)} Bs`\n"
+    msg += f"  En USDT:         `~{fmt(ganancia_usdt, 4)} USDT`\n\n"
     msg += f"🎯 *Objetivo del día:*\n"
-    msg += f"  Logrado: `{fmt(usdt_hoy, 4)} USDT`\n"
-    msg += f"  Falta:   `{fmt(falta, 4)} USDT`\n\n"
-    msg += f"_Usa /vendi USDT PRECIO para registrar tu venta_"
+    msg += f"  Logrado:  `{fmt(usdt_hoy, 4)} USDT`\n"
+    msg += f"  Falta:    `{fmt(falta, 4)} USDT`\n\n"
+    msg += f"_Registra con /vendi USDT PRECIO COMISION_"
 
     enviar_telegram(msg)
     p2p_ultimo_spread_alerta = spread
@@ -313,7 +304,7 @@ def construir_mensaje(bs_compra, bs_venta, ban_compra, ban_venta, clp_compra, cl
 
 def check_commands():
     global western_rate, last_update_id
-    global p2p_venta_abierta, p2p_ganancia_hoy_bs, p2p_fees_hoy_bs
+    global p2p_venta_abierta, p2p_ganancia_hoy_bs, p2p_fees_hoy_usdt
     global p2p_operaciones_hoy, p2p_ultima_fecha
 
     pedir_tasas = False
@@ -343,54 +334,77 @@ def check_commands():
 
             elif text.lower().startswith("/vendi"):
                 parts = text.split()
-                if len(parts) >= 3:
+                if len(parts) >= 4:
                     try:
                         usdt = float(parts[1])
                         precio = float(parts[2].replace(",", "."))
-                        p2p_venta_abierta = {"usdt": usdt, "precio_venta": precio, "hora": datetime.datetime.now().strftime("%H:%M")}
+                        comision = float(parts[3].replace(",", "."))
+                        usdt_netos = usdt - comision
+                        bs_recibidos = usdt_netos * precio
+                        p2p_venta_abierta = {
+                            "usdt": usdt,
+                            "usdt_netos": usdt_netos,
+                            "precio_venta": precio,
+                            "comision": comision,
+                            "bs_recibidos": bs_recibidos,
+                            "hora": datetime.datetime.now().strftime("%H:%M")
+                        }
                         ban_compra, _ = get_binance_banesco()
                         spread_actual = round(precio - (ban_compra or 0), 2)
                         msg  = f"✅ *Venta registrada*\n\n"
-                        msg += f"USDT vendidos:  `{fmt(usdt, 0)}`\n"
-                        msg += f"Precio venta:   `{fmt(precio)} Bs`\n"
-                        msg += f"Compra actual:  `{fmt(ban_compra)} Bs`\n"
-                        msg += f"Spread actual:  `{fmt(spread_actual)} Bs`\n\n"
-                        msg += f"_Usa /compre USDT PRECIO cuando ejecutes la compra_"
+                        msg += f"USDT vendidos:     `{fmt(usdt, 4)}`\n"
+                        msg += f"Comisión Binance:  `{fmt(comision, 4)} USDT`\n"
+                        msg += f"USDT liberados:    `{fmt(usdt_netos, 4)}`\n"
+                        msg += f"Precio:            `{fmt(precio)} Bs`\n"
+                        msg += f"Bs recibidos:      `{fmt(bs_recibidos)} Bs`\n\n"
+                        msg += f"Compra actual:     `{fmt(ban_compra)} Bs`\n"
+                        msg += f"Spread actual:     `{fmt(spread_actual)} Bs`\n\n"
+                        msg += f"_Registra la compra con /compre USDT PRECIO COMISION_"
                         enviar_telegram(msg)
                     except:
-                        enviar_telegram("⚠️ Formato inválido. Usa: `/vendi 100 744`")
+                        enviar_telegram("⚠️ Formato inválido. Usa: `/vendi 20.24 742.90 0.05`")
                 else:
-                    enviar_telegram("⚠️ Ejemplo: `/vendi 100 744`")
+                    enviar_telegram("⚠️ Ejemplo: `/vendi 20.24 742.90 0.05`")
 
             elif text.lower().startswith("/compre"):
                 parts = text.split()
-                if len(parts) >= 3 and p2p_venta_abierta:
+                if len(parts) >= 4 and p2p_venta_abierta:
                     try:
                         usdt = float(parts[1])
                         precio_compra = float(parts[2].replace(",", "."))
-                        precio_venta = p2p_venta_abierta["precio_venta"]
-                        ganancia_bs, fees_bs, ganancia_usdt = calcular_ganancia_p2p(usdt, precio_venta, precio_compra)
+                        comision = float(parts[3].replace(",", "."))
+                        usdt_netos = usdt - comision
+                        bs_pagados = usdt * precio_compra
+                        bs_recibidos = p2p_venta_abierta["bs_recibidos"]
+                        ganancia_bs = bs_recibidos - bs_pagados
+                        fees_totales_usdt = p2p_venta_abierta["comision"] + comision
                         p2p_ganancia_hoy_bs += ganancia_bs
-                        p2p_fees_hoy_bs += fees_bs
-                        p2p_operaciones_hoy.append({"usdt": usdt, "venta": precio_venta, "compra": precio_compra, "ganancia_usdt": ganancia_usdt})
+                        p2p_fees_hoy_usdt += fees_totales_usdt
+                        p2p_operaciones_hoy.append({
+                            "venta": p2p_venta_abierta["precio_venta"],
+                            "compra": precio_compra,
+                            "usdt": usdt,
+                            "ganancia_bs": ganancia_bs
+                        })
                         p2p_venta_abierta = None
                         usdt_hoy = usdt_ganados_hoy()
                         progreso = min(100, round((usdt_hoy / OBJETIVO_USDT_DIARIO) * 100, 1))
                         barra = "█" * int(progreso / 10) + "░" * (10 - int(progreso / 10))
                         msg  = f"✅ *Rotación completada*\n\n"
-                        msg += f"Vendiste:        `{fmt(precio_venta)} Bs`\n"
-                        msg += f"Compraste:       `{fmt(precio_compra)} Bs`\n"
-                        msg += f"Spread logrado:  `{fmt(precio_venta - precio_compra)} Bs`\n"
-                        msg += f"Ganancia neta:   `{fmt(ganancia_bs)} Bs`\n"
-                        msg += f"Fees Binance:    `{fmt(fees_bs)} Bs`\n"
-                        msg += f"En USDT:         `~{fmt(ganancia_usdt, 4)} USDT`\n\n"
+                        msg += f"Vendiste:          `{fmt(p2p_operaciones_hoy[-1]['venta'])} Bs`\n"
+                        msg += f"Compraste:         `{fmt(precio_compra)} Bs`\n"
+                        msg += f"USDT recibidos:    `{fmt(usdt_netos, 4)} USDT`\n"
+                        msg += f"Bs recibidos:      `{fmt(bs_recibidos)} Bs`\n"
+                        msg += f"Bs pagados:        `{fmt(bs_pagados)} Bs`\n"
+                        msg += f"Fees totales:      `{fmt(fees_totales_usdt, 4)} USDT`\n"
+                        msg += f"Ganancia neta:     `{fmt(ganancia_bs)} Bs`\n\n"
                         msg += f"🎯 Hoy: `{fmt(usdt_hoy, 4)} / {OBJETIVO_USDT_DIARIO} USDT` ({progreso}%)\n"
                         msg += f"`{barra}`"
                         enviar_telegram(msg)
                     except:
-                        enviar_telegram("⚠️ Formato inválido. Usa: `/compre 100 737`")
+                        enviar_telegram("⚠️ Formato inválido. Usa: `/compre 20.19 737.00 0.05`")
                 elif not p2p_venta_abierta:
-                    enviar_telegram("⚠️ No hay venta abierta. Primero usa `/vendi USDT PRECIO`")
+                    enviar_telegram("⚠️ No hay venta abierta. Primero usa `/vendi USDT PRECIO COMISION`")
 
             elif text.lower() == "/resumen":
                 enviar_telegram(resumen_diario())
@@ -399,8 +413,8 @@ def check_commands():
                 msg  = "📋 *Comandos disponibles*\n\n"
                 msg += "`/tasas` — Ver resumen de tasas\n"
                 msg += "`/western TASA` — Actualizar Western\n"
-                msg += "`/vendi USDT PRECIO` — Registrar venta P2P\n"
-                msg += "`/compre USDT PRECIO` — Registrar compra P2P\n"
+                msg += "`/vendi USDT PRECIO COMISION` — Registrar venta P2P\n"
+                msg += "`/compre USDT PRECIO COMISION` — Registrar compra P2P\n"
                 msg += "`/resumen` — Ver resumen del día\n"
                 msg += "`/ayuda` — Ver esta lista"
                 enviar_telegram(msg)
@@ -410,6 +424,7 @@ def check_commands():
     return pedir_tasas
 
 def main():
+    global p2p_operaciones_hoy, p2p_ganancia_hoy_bs, p2p_fees_hoy_usdt, p2p_ultima_fecha
     ultimo_envio_tasas = 0
     ultimo_check_p2p = 0
 
@@ -417,22 +432,18 @@ def main():
         pedir_tasas = check_commands()
         ahora = time.time()
 
-        # Resetear contadores a medianoche
         hoy = datetime.date.today()
-        global p2p_operaciones_hoy, p2p_ganancia_hoy_bs, p2p_fees_hoy_bs, p2p_ultima_fecha
         if p2p_ultima_fecha != hoy:
             p2p_operaciones_hoy = []
             p2p_ganancia_hoy_bs = 0
-            p2p_fees_hoy_bs = 0
+            p2p_fees_hoy_usdt = 0
             p2p_ultima_fecha = hoy
 
-        # Monitor P2P cada 5 minutos
         if (ahora - ultimo_check_p2p) >= 300:
             ban_compra, ban_venta = get_binance_banesco()
             analizar_spread_p2p(ban_compra, ban_venta)
             ultimo_check_p2p = ahora
 
-        # Resumen de tasas cada 30 minutos
         if pedir_tasas or (ahora - ultimo_envio_tasas) >= 1800:
             bs_compra, bs_venta = get_binance("VES")
             ban_compra, ban_venta = get_binance_banesco()
