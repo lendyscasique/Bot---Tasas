@@ -46,25 +46,30 @@ def get_binance_banesco():
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json"}
     def fetch_side(side):
-        payload = {
-            "asset": "USDT",
-            "fiat": "VES",
-            "merchantCheck": False,
-            "page": 1,
-            "publisherType": None,
-            "rows": 20,
-            "tradeType": side,
-            "payTypes": ["Banesco"]
-        }
-        try:
-            r = requests.post(url, headers=headers, json=payload, timeout=10)
-            ads = r.json()["data"]
-            ads = [ad for ad in ads if float(ad["adv"]["minSingleTransAmount"]) <= 1000]
-            ads = ads[:3]
-            prices = [float(ad["adv"]["price"]) for ad in ads]
-            return round(sum(prices)/len(prices), 2) if prices else None
-        except:
-            return None
+        all_ads = []
+        for page in range(1, 4):
+            payload = {
+                "asset": "USDT",
+                "fiat": "VES",
+                "merchantCheck": False,
+                "page": page,
+                "publisherType": None,
+                "rows": 20,
+                "tradeType": side,
+                "payTypes": ["Banesco"]
+            }
+            try:
+                r = requests.post(url, headers=headers, json=payload, timeout=10)
+                ads = r.json()["data"]
+                if not ads:
+                    break
+                all_ads.extend(ads)
+            except:
+                break
+        filtered = [ad for ad in all_ads if float(ad["adv"]["minSingleTransAmount"]) <= 1000]
+        filtered = filtered[:3]
+        prices = [float(ad["adv"]["price"]) for ad in filtered]
+        return round(sum(prices)/len(prices), 2) if prices else None
     return fetch_side("BUY"), fetch_side("SELL")
 
 def get_bybit_cop():
@@ -139,10 +144,10 @@ def construir_mensaje(bs_compra, bs_venta, ban_compra, ban_venta, clp_compra, cl
         msg += f"🏦  *USD/BCV*\n      `{fmt(bcv_usd)} Bs`\n\n"
     if bcv_eur:
         msg += f"🏦  *EUR/BCV*\n      `{fmt(bcv_eur)} Bs`\n\n"
-    if bs_venta:
-        msg += f"🔵  *Binance USDT/Bs*\n      Venta: `{fmt(bs_venta)} Bs` | Compra: `{fmt(bs_compra)} Bs`\n\n"
     if ban_venta:
-        msg += f"🟢  *Binance Banesco ≤1000*\n      Venta: `{fmt(ban_venta)} Bs` | Compra: `{fmt(ban_compra)} Bs`\n\n"
+        msg += f"🟢  *Binance USDT/Bs (Banesco)*\n      Venta: `{fmt(ban_venta)} Bs` | Compra: `{fmt(ban_compra)} Bs`\n\n"
+    elif bs_venta:
+        msg += f"🔵  *Binance USDT/Bs*\n      Venta: `{fmt(bs_venta)} Bs` | Compra: `{fmt(bs_compra)} Bs`\n\n"
     if clp_venta:
         msg += f"🔵  *Binance USDT/CLP*\n      Venta: `{fmt(clp_venta)} CLP` | Compra: `{fmt(clp_compra)} CLP`\n\n"
     if cop_venta:
@@ -156,7 +161,6 @@ def construir_mensaje(bs_compra, bs_venta, ban_compra, ban_venta, clp_compra, cl
     else:
         msg += f"🌍  *Western Unión*\n      _Envía /western TASA_\n\n"
 
-    # Usar tasa Banesco si disponible, sino tasa general
     bs_venta_calc = ban_venta if ban_venta else bs_venta
     bs_compra_calc = ban_compra if ban_compra else bs_compra
 
