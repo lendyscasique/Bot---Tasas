@@ -66,7 +66,7 @@ def get_binance_banesco():
                 all_ads.extend(ads)
             except:
                 break
-        filtered = [ad for ad in all_ads if float(ad["adv"]["minSingleTransAmount"]) <= 1000]
+        filtered = [ad for ad in all_ads if 1000 <= float(ad["adv"]["minSingleTransAmount"]) <= 5000]
         filtered = filtered[:3]
         prices = [float(ad["adv"]["price"]) for ad in filtered]
         return round(sum(prices)/len(prices), 2) if prices else None
