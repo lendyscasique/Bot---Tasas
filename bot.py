@@ -46,30 +46,24 @@ def get_binance_banesco():
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json"}
     def fetch_side(side):
-        all_ads = []
-        for page in range(1, 4):
-            payload = {
-                "asset": "USDT",
-                "fiat": "VES",
-                "merchantCheck": False,
-                "page": page,
-                "publisherType": None,
-                "rows": 20,
-                "tradeType": side,
-                "payTypes": ["Banesco"]
-            }
-            try:
-                r = requests.post(url, headers=headers, json=payload, timeout=10)
-                ads = r.json()["data"]
-                if not ads:
-                    break
-                all_ads.extend(ads)
-            except:
-                break
-        filtered = [ad for ad in all_ads if 1000 <= float(ad["adv"]["minSingleTransAmount"]) <= 5000]
-        filtered = filtered[:3]
-        prices = [float(ad["adv"]["price"]) for ad in filtered]
-        return round(sum(prices)/len(prices), 2) if prices else None
+        payload = {
+            "asset": "USDT",
+            "fiat": "VES",
+            "merchantCheck": False,
+            "page": 1,
+            "publisherType": None,
+            "rows": 10,
+            "tradeType": side,
+            "payTypes": ["Banesco"],
+            "transAmount": "1000"
+        }
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=10)
+            ads = r.json()["data"][:3]
+            prices = [float(ad["adv"]["price"]) for ad in ads]
+            return round(sum(prices)/len(prices), 2) if prices else None
+        except:
+            return None
     return fetch_side("BUY"), fetch_side("SELL")
 
 def get_bybit_cop():
