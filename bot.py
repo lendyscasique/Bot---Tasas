@@ -2,8 +2,6 @@ import requests
 import time
 import datetime
 import os
-import io
-from PIL import Image, ImageDraw, ImageFont
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -32,141 +30,11 @@ p2p_fees_hoy_usdt = 0
 p2p_ultimo_spread_alerta = 0
 p2p_ultima_fecha = None
 
-banderas_cache = {}
-
-def descargar_bandera(codigo):
-    if codigo in banderas_cache:
-        return banderas_cache[codigo]
-    urls = {
-        "CLP": "https://flagcdn.com/w80/cl.png",
-        "VES": "https://flagcdn.com/w80/ve.png",
-        "COP": "https://flagcdn.com/w80/co.png",
-        "USD": "https://flagcdn.com/w80/us.png",
-    }
-    try:
-        r = requests.get(urls[codigo], timeout=10)
-        img = Image.open(io.BytesIO(r.content)).convert("RGBA")
-        banderas_cache[codigo] = img
-        return img
-    except:
-        return None
-
-def circular_bandera(bandera_img, size=130):
-    mask = Image.new("L", (size, size), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.ellipse([(0,0),(size,size)], fill=255)
-    bandera = bandera_img.resize((size, size))
-    result = Image.new("RGBA", (size, size), (0,0,0,0))
-    result.paste(bandera, (0,0), mask)
-    return result
-
-def generar_imagen_tasas(tasas):
-    W, H = 900, 1600
-    AZUL_OSCURO = (10, 30, 80)
-    BLANCO = (255, 255, 255)
-    AMARILLO = (255, 210, 0)
-    AZUL_MEDIO = (20, 60, 150)
-
-    img = Image.new("RGB", (W, H), AZUL_OSCURO)
-    draw = ImageDraw.Draw(img)
-
-    for y in range(H):
-        r = int(10 + (20-10) * y/H)
-        g = int(30 + (60-30) * y/H)
-        b = int(80 + (150-80) * y/H)
-        draw.line([(0, y), (W, y)], fill=(r, g, b))
-
-    try:
-        font_titulo = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 90)
-        font_subtitulo = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 34)
-        font_fecha = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
-        font_valor = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 55)
-        font_footer = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
-    except:
-        font_titulo = ImageFont.load_default()
-        font_subtitulo = font_titulo
-        font_fecha = font_titulo
-        font_valor = font_titulo
-        font_footer = font_titulo
-
-    try:
-        logo = Image.open("1000142260.png").convert("RGBA")
-        logo = logo.resize((150, 150))
-        img.paste(logo, (W - 180, 15), logo)
-    except:
-        pass
-
-    ahora = datetime.datetime.now()
-    dias = ["LUNES","MARTES","MIÉRCOLES","JUEVES","VIERNES","SÁBADO","DOMINGO"]
-    meses = ["ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO","JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"]
-    fecha_str = f"{dias[ahora.weekday()]}, {ahora.day} DE {meses[ahora.month-1]}   {ahora.strftime('%I:%M %p')}"
-    draw.text((W//2, 30), fecha_str, font=font_fecha, fill=BLANCO, anchor="mt")
-
-    draw.text((55, 75), "TASA", font=font_titulo, fill=BLANCO)
-    draw.text((55, 165), "DEL DIA", font=font_titulo, fill=BLANCO)
-    draw.text((W//2, 280), "ACTUALIZADA EN TIEMPO REAL", font=font_subtitulo, fill=AMARILLO, anchor="mt")
-    draw.rectangle([(40, 325), (W-40, 330)], fill=AMARILLO)
-
-    banderas = {k: descargar_bandera(k) for k in ["CLP","VES","COP","USD"]}
-
-    filas = [
-        ("CLP", "VES", tasas.get("clp_bs")),
-        ("CLP", "COP", tasas.get("clp_cop")),
-        ("COP", "VES", tasas.get("cop_bs")),
-        ("USD", "VES", tasas.get("usd_bs")),
-        ("USD", "COP", tasas.get("usd_cop")),
-    ]
-
-    y_start = 355
-    row_h = 185
-    flag_size = 130
-
-    for i, (origen, destino, valor) in enumerate(filas):
-        y = y_start + i * row_h
-        cy = y + 75
-
-        draw.rounded_rectangle([(95, y+8), (W-95, y+148)], radius=65, fill=BLANCO)
-
-        draw.ellipse([(25, cy-68), (25+flag_size, cy-68+flag_size)], fill=AZUL_MEDIO, outline=BLANCO, width=4)
-        if banderas.get(origen):
-            bf = circular_bandera(banderas[origen], flag_size)
-            img.paste(bf, (25, cy-68), bf)
-
-        draw.ellipse([(W-25-flag_size, cy-68), (W-25, cy-68+flag_size)], fill=AMARILLO, outline=BLANCO, width=4)
-        if banderas.get(destino):
-            bf = circular_bandera(banderas[destino], flag_size)
-            img.paste(bf, (W-25-flag_size, cy-68), bf)
-
-        if valor:
-            val_str = fmt(valor, 4) if valor < 100 else fmt(valor, 2)
-        else:
-            val_str = "-"
-        draw.text((W//2, cy), val_str, font=font_valor, fill=AZUL_OSCURO, anchor="mm")
-
-    y_footer = y_start + 5 * row_h + 15
-    draw.rectangle([(40, y_footer), (W-40, y_footer+2)], fill=AMARILLO)
-    draw.text((W//2, y_footer+15), "COTIZA AHORA CON NOSOTROS!", font=font_footer, fill=AMARILLO, anchor="mt")
-    draw.text((W//2, y_footer+55), "ENVIA Y RECIBE TU DINERO RAPIDO Y SEGURO", font=font_footer, fill=BLANCO, anchor="mt")
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf.read()
-
 def get_binance(fiat):
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json"}
     def fetch_side(side):
-        payload = {
-            "asset": "USDT",
-            "fiat": fiat,
-            "merchantCheck": False,
-            "page": 1,
-            "publisherType": None,
-            "rows": 10,
-            "tradeType": side,
-            "payTypes": []
-        }
+        payload = {"asset":"USDT","fiat":fiat,"merchantCheck":False,"page":1,"publisherType":None,"rows":10,"tradeType":side,"payTypes":[]}
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=10)
             ads = r.json()["data"][:3]
@@ -180,17 +48,7 @@ def get_binance_banesco():
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json"}
     def fetch_side(side):
-        payload = {
-            "asset": "USDT",
-            "fiat": "VES",
-            "merchantCheck": False,
-            "page": 1,
-            "publisherType": None,
-            "rows": 10,
-            "tradeType": side,
-            "payTypes": ["Banesco"],
-            "transAmount": "1000"
-        }
+        payload = {"asset":"USDT","fiat":"VES","merchantCheck":False,"page":1,"publisherType":None,"rows":10,"tradeType":side,"payTypes":["Banesco"],"transAmount":"1000"}
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=10)
             ads = r.json()["data"][:3]
@@ -258,17 +116,10 @@ def enviar_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
 
-def enviar_imagen_telegram(imagen_bytes):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    files = {"photo": ("tasas.png", imagen_bytes, "image/png")}
-    data = {"chat_id": TELEGRAM_CHAT_ID}
-    requests.post(url, files=files, data=data, timeout=30)
-
 def usdt_ganados_hoy():
-    total_bs = p2p_ganancia_hoy_bs
     ban_compra, _ = get_binance_banesco()
     precio_ref = ban_compra if ban_compra else 737
-    return round(total_bs / precio_ref, 4) if precio_ref else 0
+    return round(p2p_ganancia_hoy_bs / precio_ref, 4) if precio_ref else 0
 
 def resumen_diario():
     usdt_hoy = usdt_ganados_hoy()
@@ -303,8 +154,7 @@ def analizar_spread_p2p(ban_compra, ban_venta):
         nivel = "MODERADO"
     usdt_hoy = usdt_ganados_hoy()
     falta = max(0, OBJETIVO_USDT_DIARIO - usdt_hoy)
-    usdt_netos = 100 * (1 - 0.0025)
-    bs_recibidos = usdt_netos * ban_venta
+    bs_recibidos = 100 * (1 - 0.0025) * ban_venta
     bs_pagados = 100 * ban_compra
     ganancia_bs = bs_recibidos - bs_pagados - (0.05 * ban_compra)
     ganancia_usdt = round(ganancia_bs / ban_compra, 4)
@@ -411,7 +261,6 @@ def check_commands():
     global p2p_venta_abierta, p2p_ganancia_hoy_bs, p2p_fees_hoy_usdt
     global p2p_operaciones_hoy, p2p_ultima_fecha
     pedir_tasas = False
-    pedir_imagen = False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
         params = {"timeout": 0}
@@ -433,8 +282,6 @@ def check_commands():
                     enviar_telegram("⚠️ Ejemplo: `/western 4.1377`")
             elif text.lower() == "/tasas":
                 pedir_tasas = True
-            elif text.lower() == "/imagen":
-                pedir_imagen = True
             elif text.lower().startswith("/vendi"):
                 parts = text.split()
                 if len(parts) >= 4:
@@ -500,7 +347,6 @@ def check_commands():
             elif text.lower() == "/ayuda":
                 msg  = "📋 *Comandos disponibles*\n\n"
                 msg += "`/tasas` — Ver resumen de tasas\n"
-                msg += "`/imagen` — Generar imagen para publicar\n"
                 msg += "`/western TASA` — Actualizar Western\n"
                 msg += "`/vendi USDT PRECIO COMISION` — Registrar venta P2P\n"
                 msg += "`/compre USDT PRECIO COMISION` — Registrar compra P2P\n"
@@ -509,7 +355,7 @@ def check_commands():
                 enviar_telegram(msg)
     except Exception as e:
         print(f"Error check_commands: {e}")
-    return pedir_tasas, pedir_imagen
+    return pedir_tasas
 
 def main():
     global p2p_operaciones_hoy, p2p_ganancia_hoy_bs, p2p_fees_hoy_usdt, p2p_ultima_fecha
@@ -517,7 +363,7 @@ def main():
     ultimo_check_p2p = 0
 
     while True:
-        pedir_tasas, pedir_imagen = check_commands()
+        pedir_tasas = check_commands()
         ahora = time.time()
 
         hoy = datetime.date.today()
@@ -532,7 +378,7 @@ def main():
             analizar_spread_p2p(ban_compra, ban_venta)
             ultimo_check_p2p = ahora
 
-        if pedir_tasas or pedir_imagen or (ahora - ultimo_envio_tasas) >= 1800:
+        if pedir_tasas or (ahora - ultimo_envio_tasas) >= 1800:
             bs_compra, bs_venta = get_binance("VES")
             ban_compra, ban_venta = get_binance_banesco()
             clp_compra, clp_venta = get_binance("CLP")
@@ -541,42 +387,8 @@ def main():
             usd_clp = get_dolar_observado()
             trm = get_trm()
             bcv_usd, bcv_eur = get_bcv()
-
-            bs_venta_calc = ban_venta if ban_venta else bs_venta
-            bs_compra_calc = ban_compra if ban_compra else bs_compra
-
-            limite_clp_bs = None
-            limite_clp_cop = None
-            if bs_compra_calc and bs_venta_calc and usd_clp:
-                limite_clp_bs = (bs_venta_calc * (1 - FEE_USDT_BS)) / (usd_clp * (1 + FEE_USDT_CLP))
-            if western_rate:
-                limite_clp_cop = western_rate * (1 - FEE_WU)
-
-            tasas_img = {}
-            if limite_clp_bs:
-                tasas_img["clp_bs"] = round(limite_clp_bs * (1 - FEE_CLP_BS), 4)
-            if limite_clp_cop:
-                tasas_img["clp_cop"] = round(limite_clp_cop * (1 - FEE_CLP_COP), 4)
-            if limite_clp_bs and limite_clp_cop:
-                limite_bs_cop = limite_clp_cop / limite_clp_bs
-                tasas_img["cop_bs"] = round(limite_bs_cop * (1 - FEE_COP_BS), 4)
-            if bs_venta_calc:
-                tasas_img["usd_bs"] = bs_venta_calc
-            if bybit_compra:
-                tasas_img["usd_cop"] = bybit_compra
-            elif cop_compra:
-                tasas_img["usd_cop"] = cop_compra
-
-            if not pedir_imagen:
-                msg = construir_mensaje(bs_compra, bs_venta, ban_compra, ban_venta, clp_compra, clp_venta, cop_compra, cop_venta, bybit_compra, bybit_venta, usd_clp, trm, bcv_usd, bcv_eur)
-                enviar_telegram(msg)
-
-            try:
-                imagen = generar_imagen_tasas(tasas_img)
-                enviar_imagen_telegram(imagen)
-            except Exception as e:
-                print(f"Error generando imagen: {e}")
-
+            msg = construir_mensaje(bs_compra, bs_venta, ban_compra, ban_venta, clp_compra, clp_venta, cop_compra, cop_venta, bybit_compra, bybit_venta, usd_clp, trm, bcv_usd, bcv_eur)
+            enviar_telegram(msg)
             ultimo_envio_tasas = ahora
             print(f"Enviado — {datetime.datetime.now().strftime('%H:%M:%S')}")
 
