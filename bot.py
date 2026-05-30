@@ -2,6 +2,8 @@ import requests
 import time
 import datetime
 import os
+import io
+from PIL import Image, ImageDraw, ImageFont
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -29,6 +31,14 @@ p2p_ganancia_hoy_bs = 0
 p2p_fees_hoy_usdt = 0
 p2p_ultimo_spread_alerta = 0
 p2p_ultima_fecha = None
+
+# Emojis de banderas como texto
+BANDERAS = {
+    "CLP": "🇨🇱",
+    "VES": "🇻🇪",
+    "COP": "🇨🇴",
+    "USD": "🇺🇸",
+}
 
 def get_binance(fiat):
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
@@ -135,6 +145,112 @@ def enviar_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
 
+def enviar_imagen_telegram(imagen_bytes):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    files = {"photo": ("tasas.png", imagen_bytes, "image/png")}
+    data = {"chat_id": TELEGRAM_CHAT_ID}
+    requests.post(url, files=files, data=data, timeout=30)
+
+def generar_imagen_tasas(tasas):
+    W, H = 900, 1600
+    AZUL_OSCURO = (10, 30, 80)
+    AZUL_MEDIO = (20, 60, 150)
+    BLANCO = (255, 255, 255)
+    AMARILLO = (255, 210, 0)
+
+    img = Image.new("RGB", (W, H), AZUL_OSCURO)
+    draw = ImageDraw.Draw(img)
+
+    # Fondo degradado simulado
+    for y in range(H):
+        r = int(10 + (20-10) * y/H)
+        g = int(30 + (60-30) * y/H)
+        b = int(80 + (150-80) * y/H)
+        draw.line([(0, y), (W, y)], fill=(r, g, b))
+
+    # Intentar cargar fuentes
+    try:
+        font_titulo = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 90)
+        font_subtitulo = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
+        font_fecha = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32)
+        font_valor = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 60)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
+        font_footer = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 30)
+    except:
+        font_titulo = ImageFont.load_default()
+        font_subtitulo = font_titulo
+        font_fecha = font_titulo
+        font_valor = font_titulo
+        font_small = font_titulo
+        font_footer = font_titulo
+
+    # Logo GSA
+    try:
+        logo = Image.open("1000142260.png").convert("RGBA")
+        logo = logo.resize((160, 160))
+        img.paste(logo, (W - 190, 20), logo)
+    except:
+        pass
+
+    # Fecha y hora
+    ahora = datetime.datetime.now()
+    dias = ["LUNES","MARTES","MIÉRCOLES","JUEVES","VIERNES","SÁBADO","DOMINGO"]
+    meses = ["ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO","JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"]
+    fecha_str = f"{dias[ahora.weekday()]}, {ahora.day} DE {meses[ahora.month-1]}   {ahora.strftime('%I:%M %p')}"
+    draw.text((W//2, 35), fecha_str, font=font_fecha, fill=BLANCO, anchor="mt")
+
+    # Título
+    draw.text((60, 80), "TASA", font=font_titulo, fill=BLANCO)
+    draw.text((60, 170), "DEL DIA", font=font_titulo, fill=BLANCO)
+
+    # Subtítulo
+    draw.text((W//2, 285), "ACTUALIZADA EN TIEMPO REAL", font=font_subtitulo, fill=AMARILLO, anchor="mt")
+
+    # Línea separadora
+    draw.rectangle([(40, 320), (W-40, 325)], fill=AMARILLO)
+
+    # Filas de tasas
+    filas = [
+        ("CLP", "VES", tasas.get("clp_bs")),
+        ("CLP", "COP", tasas.get("clp_cop")),
+        ("COP", "VES", tasas.get("cop_bs")),
+        ("USD", "VES", tasas.get("usd_bs")),
+        ("USD", "COP", tasas.get("usd_cop")),
+    ]
+
+    y_start = 360
+    row_h = 190
+
+    for i, (origen, destino, valor) in enumerate(filas):
+        y = y_start + i * row_h
+        cy = y + 75
+
+        # Barra blanca
+        draw.rounded_rectangle([(100, y+10), (W-100, y+150)], radius=70, fill=BLANCO)
+
+        # Círculo izquierdo
+        draw.ellipse([(30, cy-70), (170, cy+70)], fill=AZUL_MEDIO, outline=BLANCO, width=4)
+        draw.text((100, cy), BANDERAS[origen], font=font_valor, fill=BLANCO, anchor="mm")
+
+        # Círculo derecho
+        draw.ellipse([(W-170, cy-70), (W-30, cy+70)], fill=AMARILLO, outline=BLANCO, width=4)
+        draw.text((W-100, cy), BANDERAS[destino], font=font_valor, fill=AZUL_OSCURO, anchor="mm")
+
+        # Valor
+        val_str = fmt(valor, 4) if valor and valor < 10 else (fmt(valor, 2) if valor else "-")
+        draw.text((W//2, cy), val_str, font=font_valor, fill=AZUL_OSCURO, anchor="mm")
+
+    # Footer
+    y_footer = y_start + 5 * row_h + 20
+    draw.rectangle([(40, y_footer), (W-40, y_footer+2)], fill=AMARILLO)
+    draw.text((W//2, y_footer+20), "📲 ¡COTIZA AHORA CON NOSOTROS!", font=font_footer, fill=AMARILLO, anchor="mt")
+    draw.text((W//2, y_footer+65), "🚀 ENVÍA Y RECIBE TU DINERO RÁPIDO Y SEGURO", font=font_footer, fill=BLANCO, anchor="mt")
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf.read()
+
 def usdt_ganados_hoy():
     total_bs = p2p_ganancia_hoy_bs
     ban_compra, _ = get_binance_banesco()
@@ -156,16 +272,13 @@ def resumen_diario():
 
 def analizar_spread_p2p(ban_compra, ban_venta):
     global p2p_ultimo_spread_alerta
-
     if not ban_compra or not ban_venta:
         return
-
     spread = round(ban_venta - ban_compra, 2)
     if spread < SPREAD_MINIMO:
         return
     if spread == p2p_ultimo_spread_alerta:
         return
-
     if spread >= SPREAD_PREMIUM:
         emoji = "🚀"
         nivel = "PREMIUM"
@@ -175,18 +288,13 @@ def analizar_spread_p2p(ban_compra, ban_venta):
     else:
         emoji = "🟡"
         nivel = "MODERADO"
-
     usdt_hoy = usdt_ganados_hoy()
     falta = max(0, OBJETIVO_USDT_DIARIO - usdt_hoy)
-
-    # Ganancia estimada por 100 USDT
     usdt_netos = 100 * (1 - 0.0025)
     bs_recibidos = usdt_netos * ban_venta
     bs_pagados = 100 * ban_compra
-    fee_estimado = 0.05
-    ganancia_bs = bs_recibidos - bs_pagados - (fee_estimado * ban_compra)
+    ganancia_bs = bs_recibidos - bs_pagados - (0.05 * ban_compra)
     ganancia_usdt = round(ganancia_bs / ban_compra, 4)
-
     msg  = f"{emoji} *SEÑAL P2P — {nivel}*\n\n"
     msg += f"Spread actual:     `{fmt(spread)} Bs`\n"
     msg += f"Venta mercado:     `{fmt(ban_venta)} Bs`\n"
@@ -200,18 +308,15 @@ def analizar_spread_p2p(ban_compra, ban_venta):
     msg += f"  Logrado:  `{fmt(usdt_hoy, 4)} USDT`\n"
     msg += f"  Falta:    `{fmt(falta, 4)} USDT`\n\n"
     msg += f"_Registra con /vendi USDT PRECIO COMISION_"
-
     enviar_telegram(msg)
     p2p_ultimo_spread_alerta = spread
 
 def construir_mensaje(bs_compra, bs_venta, ban_compra, ban_venta, clp_compra, clp_venta, cop_compra, cop_venta, bybit_compra, bybit_venta, usd_clp, trm, bcv_usd, bcv_eur):
     ahora = datetime.datetime.now().strftime("%d/%m/%Y — %I:%M %p")
-
     msg  = f"📊 *RESUMEN DE TASAS*\n"
     msg += f"📅 {ahora}\n"
     msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
     msg += f"🌎 *TASAS OFICIALES*\n\n"
-
     if trm:
         msg += f"🇨🇴  *TRM*\n      `{fmt(trm)} COP`\n\n"
     if bcv_usd:
@@ -234,63 +339,50 @@ def construir_mensaje(bs_compra, bs_venta, ban_compra, ban_venta, clp_compra, cl
         msg += f"🌍  *Western Unión*\n      `{fmt(western_rate, 4)} CLP/COP`\n\n"
     else:
         msg += f"🌍  *Western Unión*\n      _Envía /western TASA_\n\n"
-
     bs_venta_calc = ban_venta if ban_venta else bs_venta
     bs_compra_calc = ban_compra if ban_compra else bs_compra
-
     limite_clp_bs = None
     limite_clp_cop = None
     if bs_compra_calc and bs_venta_calc and usd_clp:
         limite_clp_bs = (bs_venta_calc * (1 - FEE_USDT_BS)) / (usd_clp * (1 + FEE_USDT_CLP))
     if western_rate:
         limite_clp_cop = western_rate * (1 - FEE_WU)
-
     msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
     msg += f"💱 *GSA CAMBIOS*\n\n"
     msg += f"📌 *Giros*\n\n"
-
     if limite_clp_bs:
         clp_bs = round(limite_clp_bs * (1 - FEE_CLP_BS), 6)
         bs_clp = round(limite_clp_bs * (1 + FEE_BS_CLP), 6)
         msg += f"🇨🇱➡️🇻🇪  CLP → Bs\n      `{fmt(clp_bs, 6)}`\n\n"
         msg += f"🇻🇪➡️🇨🇱  Bs → CLP\n      `{fmt(bs_clp, 6)}`\n\n"
-
     if limite_clp_cop:
         clp_cop = round(limite_clp_cop * (1 - FEE_CLP_COP), 4)
         cop_clp = round(limite_clp_cop * (1 + FEE_CLP_COP), 4)
         msg += f"🇨🇱➡️🇨🇴  CLP → COP\n      `{fmt(clp_cop, 4)}`\n\n"
         msg += f"🇨🇴➡️🇨🇱  COP → CLP\n      `{fmt(cop_clp, 4)}`\n\n"
-
     if usd_clp:
         msg += f"🇨🇱➡️🇺🇸  CLP → USD\n      `{fmt(usd_clp + SPREAD_CLP)} CLP`\n\n"
         msg += f"🇺🇸➡️🇨🇱  USD → CLP\n      `{fmt(usd_clp - SPREAD_CLP)} CLP`\n\n"
-
     msg += f"📌 *Compra / Venta Bolívares*\n\n"
-
     if bs_compra_calc and bs_venta_calc:
         usd_bs_compra = round(((bs_venta_calc + bs_compra_calc) / 2) - MARGEN_BS, 2)
         msg += f"🔵  USD → Bs\n      `{fmt(bs_venta_calc)} Bs`\n\n"
         msg += f"🔵  Bs → USD\n      `{fmt(usd_bs_compra)} Bs`\n\n"
-
     if limite_clp_bs and limite_clp_cop:
         limite_bs_cop = limite_clp_cop / limite_clp_bs
         cop_bs = round(limite_bs_cop * (1 - FEE_COP_BS), 4)
         bs_cop = round(limite_bs_cop * (1 + FEE_COP_BS), 4)
         msg += f"🔵  COP → Bs\n      `{fmt(cop_bs, 4)}`\n\n"
         msg += f"🔵  Bs → COP\n      `{fmt(bs_cop, 4)}`\n\n"
-
     msg += f"📌 *Compra / Venta Pesos Colombianos*\n\n"
-
     if bybit_venta and bybit_compra:
         msg += f"🟠  USD → COP\n      `{fmt(bybit_compra)} COP`\n\n"
         msg += f"🟠  COP → USD\n      `{fmt(bybit_venta)} COP`\n\n"
     elif cop_venta and cop_compra:
         msg += f"🔵  USD → COP\n      `{fmt(cop_compra)} COP`\n\n"
         msg += f"🔵  COP → USD\n      `{fmt(cop_venta)} COP`\n\n"
-
     msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
     msg += f"📐 *LÍMITES OPERATIVOS*\n\n"
-
     if limite_clp_bs:
         msg += f"🔴  *Límite CLP/Bs*\n      `{fmt(limite_clp_bs, 6)}`\n\n"
     if limite_clp_cop:
@@ -298,7 +390,6 @@ def construir_mensaje(bs_compra, bs_venta, ban_compra, ban_venta, clp_compra, cl
         if limite_clp_bs:
             limite_bs_cop = limite_clp_cop / limite_clp_bs
             msg += f"🔴  *Límite Bs/COP*\n      `{fmt(limite_bs_cop, 4)}`\n\n"
-
     msg += f"━━━━━━━━━━━━━━━━━━━━"
     return msg
 
@@ -306,7 +397,6 @@ def check_commands():
     global western_rate, last_update_id
     global p2p_venta_abierta, p2p_ganancia_hoy_bs, p2p_fees_hoy_usdt
     global p2p_operaciones_hoy, p2p_ultima_fecha
-
     pedir_tasas = False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
@@ -317,7 +407,6 @@ def check_commands():
         for update in data.get("result", []):
             last_update_id = update["update_id"]
             text = (update.get("message", {}).get("text", "") or "").strip()
-
             if text.lower().startswith("/western"):
                 parts = text.split()
                 if len(parts) >= 2:
@@ -328,10 +417,10 @@ def check_commands():
                         enviar_telegram("⚠️ Formato inválido. Usa: `/western 4.1377`")
                 else:
                     enviar_telegram("⚠️ Ejemplo: `/western 4.1377`")
-
             elif text.lower() == "/tasas":
                 pedir_tasas = True
-
+            elif text.lower() == "/imagen":
+                pedir_tasas = True
             elif text.lower().startswith("/vendi"):
                 parts = text.split()
                 if len(parts) >= 4:
@@ -341,14 +430,7 @@ def check_commands():
                         comision = float(parts[3].replace(",", "."))
                         usdt_netos = usdt - comision
                         bs_recibidos = usdt_netos * precio
-                        p2p_venta_abierta = {
-                            "usdt": usdt,
-                            "usdt_netos": usdt_netos,
-                            "precio_venta": precio,
-                            "comision": comision,
-                            "bs_recibidos": bs_recibidos,
-                            "hora": datetime.datetime.now().strftime("%H:%M")
-                        }
+                        p2p_venta_abierta = {"usdt": usdt, "usdt_netos": usdt_netos, "precio_venta": precio, "comision": comision, "bs_recibidos": bs_recibidos, "hora": datetime.datetime.now().strftime("%H:%M")}
                         ban_compra, _ = get_binance_banesco()
                         spread_actual = round(precio - (ban_compra or 0), 2)
                         msg  = f"✅ *Venta registrada*\n\n"
@@ -365,7 +447,6 @@ def check_commands():
                         enviar_telegram("⚠️ Formato inválido. Usa: `/vendi 20.24 742.90 0.05`")
                 else:
                     enviar_telegram("⚠️ Ejemplo: `/vendi 20.24 742.90 0.05`")
-
             elif text.lower().startswith("/compre"):
                 parts = text.split()
                 if len(parts) >= 4 and p2p_venta_abierta:
@@ -380,12 +461,7 @@ def check_commands():
                         fees_totales_usdt = p2p_venta_abierta["comision"] + comision
                         p2p_ganancia_hoy_bs += ganancia_bs
                         p2p_fees_hoy_usdt += fees_totales_usdt
-                        p2p_operaciones_hoy.append({
-                            "venta": p2p_venta_abierta["precio_venta"],
-                            "compra": precio_compra,
-                            "usdt": usdt,
-                            "ganancia_bs": ganancia_bs
-                        })
+                        p2p_operaciones_hoy.append({"venta": p2p_venta_abierta["precio_venta"], "compra": precio_compra, "usdt": usdt, "ganancia_bs": ganancia_bs})
                         p2p_venta_abierta = None
                         usdt_hoy = usdt_ganados_hoy()
                         progreso = min(100, round((usdt_hoy / OBJETIVO_USDT_DIARIO) * 100, 1))
@@ -405,20 +481,18 @@ def check_commands():
                         enviar_telegram("⚠️ Formato inválido. Usa: `/compre 20.19 737.00 0.05`")
                 elif not p2p_venta_abierta:
                     enviar_telegram("⚠️ No hay venta abierta. Primero usa `/vendi USDT PRECIO COMISION`")
-
             elif text.lower() == "/resumen":
                 enviar_telegram(resumen_diario())
-
             elif text.lower() == "/ayuda":
                 msg  = "📋 *Comandos disponibles*\n\n"
                 msg += "`/tasas` — Ver resumen de tasas\n"
+                msg += "`/imagen` — Generar imagen para publicar\n"
                 msg += "`/western TASA` — Actualizar Western\n"
                 msg += "`/vendi USDT PRECIO COMISION` — Registrar venta P2P\n"
                 msg += "`/compre USDT PRECIO COMISION` — Registrar compra P2P\n"
                 msg += "`/resumen` — Ver resumen del día\n"
                 msg += "`/ayuda` — Ver esta lista"
                 enviar_telegram(msg)
-
     except Exception as e:
         print(f"Error check_commands: {e}")
     return pedir_tasas
@@ -453,8 +527,43 @@ def main():
             usd_clp = get_dolar_observado()
             trm = get_trm()
             bcv_usd, bcv_eur = get_bcv()
+
+            bs_venta_calc = ban_venta if ban_venta else bs_venta
+            bs_compra_calc = ban_compra if ban_compra else bs_compra
+
+            limite_clp_bs = None
+            limite_clp_cop = None
+            if bs_compra_calc and bs_venta_calc and usd_clp:
+                limite_clp_bs = (bs_venta_calc * (1 - FEE_USDT_BS)) / (usd_clp * (1 + FEE_USDT_CLP))
+            if western_rate:
+                limite_clp_cop = western_rate * (1 - FEE_WU)
+
+            # Calcular tasas para imagen
+            tasas_img = {}
+            if limite_clp_bs:
+                tasas_img["clp_bs"] = round(limite_clp_bs * (1 - FEE_CLP_BS), 4)
+            if limite_clp_cop:
+                tasas_img["clp_cop"] = round(limite_clp_cop * (1 - FEE_CLP_COP), 4)
+            if limite_clp_bs and limite_clp_cop:
+                limite_bs_cop = limite_clp_cop / limite_clp_bs
+                tasas_img["cop_bs"] = round(limite_bs_cop * (1 - FEE_COP_BS), 4)
+            if bs_venta_calc:
+                tasas_img["usd_bs"] = bs_venta_calc
+            if bybit_compra:
+                tasas_img["usd_cop"] = bybit_compra
+            elif cop_compra:
+                tasas_img["usd_cop"] = cop_compra
+
             msg = construir_mensaje(bs_compra, bs_venta, ban_compra, ban_venta, clp_compra, clp_venta, cop_compra, cop_venta, bybit_compra, bybit_venta, usd_clp, trm, bcv_usd, bcv_eur)
             enviar_telegram(msg)
+
+            # Generar y enviar imagen
+            try:
+                imagen = generar_imagen_tasas(tasas_img)
+                enviar_imagen_telegram(imagen)
+            except Exception as e:
+                print(f"Error generando imagen: {e}")
+
             ultimo_envio_tasas = ahora
             print(f"Tasas enviadas — {datetime.datetime.now().strftime('%H:%M:%S')}")
 
