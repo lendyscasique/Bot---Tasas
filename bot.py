@@ -24,10 +24,10 @@ western_rate = None
 last_update_id = None
 p2p_ultimo_spread_alerta = 0
 
-def get_binance(fiat):
+def get_binance_fiat(fiat):
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json"}
-    def fetch_side(side):
+    def fetch(side):
         payload = {"asset":"USDT","fiat":fiat,"merchantCheck":False,"page":1,"publisherType":None,"rows":10,"tradeType":side,"payTypes":[]}
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=10)
@@ -36,23 +36,17 @@ def get_binance(fiat):
             return round(sum(prices)/len(prices), 2) if prices else None
         except:
             return None
-    return fetch_side("SELL"), fetch_side("BUY")
+    compra = fetch("SELL")
+    venta = fetch("BUY")
+    return compra, venta
 
 def get_binance_banco(banco):
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json"}
-
-    pay_venta = [banco, "PagoMovil"] if banco in ["Banesco", "Mercantil"] else [banco]
+    pay_venta = [banco, "PagoMovil"]
 
     def fetch_venta():
-        payload = {
-            "asset": "USDT", "fiat": "VES",
-            "merchantCheck": False, "page": 1,
-            "publisherType": None, "rows": 10,
-            "tradeType": "BUY",
-            "payTypes": pay_venta,
-            "transAmount": "1000"
-        }
+        payload = {"asset":"USDT","fiat":"VES","merchantCheck":False,"page":1,"publisherType":None,"rows":10,"tradeType":"BUY","payTypes":pay_venta,"transAmount":"1000"}
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=10)
             ads = r.json()["data"][:3]
@@ -62,14 +56,7 @@ def get_binance_banco(banco):
             return None
 
     def fetch_compra():
-        payload = {
-            "asset": "USDT", "fiat": "VES",
-            "merchantCheck": False, "page": 1,
-            "publisherType": None, "rows": 10,
-            "tradeType": "SELL",
-            "payTypes": [banco],
-            "transAmount": "1000"
-        }
+        payload = {"asset":"USDT","fiat":"VES","merchantCheck":False,"page":1,"publisherType":None,"rows":10,"tradeType":"SELL","payTypes":[banco],"transAmount":"1000"}
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=10)
             ads = r.json()["data"][:3]
@@ -87,9 +74,9 @@ def get_mejor_banco():
     ban_compra, ban_venta, ban_spread = get_binance_banco("Banesco")
     mer_compra, mer_venta, mer_spread = get_binance_banco("Mercantil")
     if mer_spread > ban_spread:
-        return "Mercantil", mer_compra, mer_venta, mer_spread, ban_compra, ban_venta, ban_spread
+        return "Mercantil", mer_compra, mer_venta, mer_spread, "Banesco", ban_compra, ban_venta, ban_spread
     else:
-        return "Banesco", ban_compra, ban_venta, ban_spread, mer_compra, mer_venta, mer_spread
+        return "Banesco", ban_compra, ban_venta, ban_spread, "Mercantil", mer_compra, mer_venta, mer_spread
 
 def get_dolar_observado():
     try:
@@ -154,7 +141,6 @@ def analizar_spread_p2p(mejor_banco, compra, venta, spread):
         return
     if spread == p2p_ultimo_spread_alerta:
         return
-
     if spread >= SPREAD_BUENO:
         emoji = "🚀"
         nivel = "PREMIUM"
@@ -167,7 +153,6 @@ def analizar_spread_p2p(mejor_banco, compra, venta, spread):
 
     bs_recibidos = 100 * (1 - FEE_USDT_BS) * venta
     bs_pagados = 100 * compra
-    fee_total_bs = (100 * FEE_USDT_BS * venta) + (100 * FEE_USDT_BS * compra)
     ganancia_bs = bs_recibidos - bs_pagados
     ganancia_usdt = round(ganancia_bs / compra, 4)
 
@@ -179,7 +164,6 @@ def analizar_spread_p2p(mejor_banco, compra, venta, spread):
     msg += f"📊 *Estimado 100 USDT:*\n"
     msg += f"  Bs recibidos:    `{fmt(bs_recibidos)} Bs`\n"
     msg += f"  Bs pagados:      `{fmt(bs_pagados)} Bs`\n"
-    msg += f"  Fee Binance:     `{fmt(fee_total_bs)} Bs`\n"
     msg += f"  Ganancia neta:   `{fmt(ganancia_bs)} Bs`\n"
     msg += f"  En USDT:         `~{fmt(ganancia_usdt, 4)} USDT`\n\n"
     msg += f"_Vende con {mejor_banco} + Pago Móvil_\n"
@@ -187,7 +171,7 @@ def analizar_spread_p2p(mejor_banco, compra, venta, spread):
     enviar_telegram(msg)
     p2p_ultimo_spread_alerta = spread
 
-def construir_mensaje(bs_compra, bs_venta, mejor_banco, m_compra, m_venta, m_spread, o_banco, o_compra, o_venta, o_spread, clp_compra, clp_venta, cop_compra, cop_venta, usd_clp, trm, bcv_usd, bcv_eur):
+def construir_mensaje(mejor_banco, m_compra, m_venta, m_spread, o_banco, o_compra, o_venta, o_spread, clp_compra, clp_venta, cop_compra, cop_venta, usd_clp, trm, bcv_usd, bcv_eur):
     ahora = datetime.datetime.now().strftime("%d/%m/%Y — %I:%M %p")
     msg  = f"📊 *RESUMEN DE TASAS*\n"
     msg += f"📅 {ahora}\n"
@@ -201,7 +185,6 @@ def construir_mensaje(bs_compra, bs_venta, mejor_banco, m_compra, m_venta, m_spr
     if bcv_eur:
         msg += f"🏦  *EUR/BCV*\n      `{fmt(bcv_eur)} Bs`\n\n"
 
-    # Binance Bs — ambos bancos
     if m_venta and m_compra:
         msg += f"🏦  *Binance {mejor_banco}* {spread_emoji(m_spread)}\n"
         msg += f"      Compra: `{fmt(m_compra)} Bs` | Venta: `{fmt(m_venta)} Bs`\n"
@@ -224,7 +207,6 @@ def construir_mensaje(bs_compra, bs_venta, mejor_banco, m_compra, m_venta, m_spr
     else:
         msg += f"🌍  *Western Unión*\n      _Envía /western TASA_\n\n"
 
-    # Calcular con mejor banco
     limite_clp_bs = None
     limite_clp_cop = None
     if m_compra and m_venta and usd_clp:
@@ -326,13 +308,13 @@ def check_commands():
                     msg += f"  Ganancia neta: `{fmt(ganancia_bs)} Bs`\n"
                     msg += f"  En USDT: `~{fmt(ganancia_usdt, 4)} USDT`\n"
                 else:
-                    msg += f"_Spread por debajo del mínimo operativo ({SPREAD_SILENCIO} Bs)_"
+                    msg += f"_Spread por debajo del mínimo ({SPREAD_SILENCIO} Bs)_"
                 enviar_telegram(msg)
 
             elif text.lower() == "/ayuda":
                 msg  = "📋 *Comandos disponibles*\n\n"
                 msg += "`/tasas` — Ver resumen completo de tasas\n"
-                msg += "`/spread` — Ver spread P2P Banesco vs Mercantil\n"
+                msg += "`/spread` — Ver spread Banesco vs Mercantil\n"
                 msg += "`/western TASA` — Actualizar Western Unión\n"
                 msg += "`/ayuda` — Ver esta lista"
                 enviar_telegram(msg)
@@ -355,14 +337,13 @@ def main():
             ultimo_check_p2p = ahora
 
         if pedir_tasas or (ahora - ultimo_envio_tasas) >= 1800:
-            bs_compra, bs_venta = get_binance("VES")
             mejor_banco, m_compra, m_venta, m_spread, o_banco, o_compra, o_venta, o_spread = get_mejor_banco()
-            clp_compra, clp_venta = get_binance("CLP")
-            cop_compra, cop_venta = get_binance("COP")
+            clp_compra, clp_venta = get_binance_fiat("CLP")
+            cop_compra, cop_venta = get_binance_fiat("COP")
             usd_clp = get_dolar_observado()
             trm = get_trm()
             bcv_usd, bcv_eur = get_bcv()
-            msg = construir_mensaje(bs_compra, bs_venta, mejor_banco, m_compra, m_venta, m_spread, o_banco, o_compra, o_venta, o_spread, clp_compra, clp_venta, cop_compra, cop_venta, usd_clp, trm, bcv_usd, bcv_eur)
+            msg = construir_mensaje(mejor_banco, m_compra, m_venta, m_spread, o_banco, o_compra, o_venta, o_spread, clp_compra, clp_venta, cop_compra, cop_venta, usd_clp, trm, bcv_usd, bcv_eur)
             enviar_telegram(msg)
             ultimo_envio_tasas = ahora
             print(f"Enviado — {datetime.datetime.now().strftime('%H:%M:%S')}")
