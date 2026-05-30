@@ -29,6 +29,8 @@ p2p_ganancia_hoy_bs = 0
 p2p_fees_hoy_usdt = 0
 p2p_ultimo_spread_alerta = 0
 p2p_ultima_fecha = None
+p2p_capital_inicial_usdt = 0
+p2p_capital_actual_usdt = 0
 
 def get_binance(fiat):
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
@@ -42,8 +44,6 @@ def get_binance(fiat):
             return round(sum(prices)/len(prices), 2) if prices else None
         except:
             return None
-    # BUY = precio al que compran USDT (tú vendes) = Venta
-    # SELL = precio al que venden USDT (tú compras) = Compra
     venta = fetch_side("BUY")
     compra = fetch_side("SELL")
     return compra, venta
@@ -122,8 +122,30 @@ def resumen_diario():
     msg += f"Ganancia neta:     `{fmt(p2p_ganancia_hoy_bs)} Bs`\n"
     msg += f"Fees totales:      `{fmt(p2p_fees_hoy_usdt, 4)} USDT`\n"
     msg += f"Ganancia en USDT:  `~{fmt(usdt_hoy, 4)} USDT`\n\n"
+    if p2p_capital_inicial_usdt > 0:
+        rentabilidad = round((usdt_hoy / p2p_capital_inicial_usdt) * 100, 2)
+        msg += f"Capital inicial:   `{fmt(p2p_capital_inicial_usdt, 2)} USDT`\n"
+        msg += f"Capital actual:    `{fmt(p2p_capital_actual_usdt, 2)} USDT`\n"
+        msg += f"Rentabilidad:      `{rentabilidad}%`\n\n"
     msg += f"🎯 Objetivo {OBJETIVO_USDT_DIARIO} USDT: {progreso}%\n"
     msg += f"`{barra}`\n"
+    return msg
+
+def historial_operaciones():
+    if not p2p_operaciones_hoy:
+        return "📋 *No hay operaciones registradas hoy.*"
+    msg = f"📋 *HISTORIAL DE HOY*\n\n"
+    for i, op in enumerate(p2p_operaciones_hoy, 1):
+        ganancia_signo = "✅" if op['ganancia_bs'] >= 0 else "❌"
+        msg += f"{ganancia_signo} *Op {i}* — {op.get('hora', '--:--')}\n"
+        msg += f"  Vendí:    `{fmt(op['venta'])} Bs` × `{fmt(op['usdt'], 4)} USDT`\n"
+        msg += f"  Compré:   `{fmt(op['compra'])} Bs`\n"
+        msg += f"  Spread:   `{fmt(op['venta'] - op['compra'])} Bs`\n"
+        msg += f"  Ganancia: `{fmt(op['ganancia_bs'])} Bs`\n"
+        msg += f"  Fees:     `{fmt(op.get('fees_usdt', 0), 4)} USDT`\n\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━\n"
+    msg += f"Total ganancia: `{fmt(p2p_ganancia_hoy_bs)} Bs`\n"
+    msg += f"Total fees:     `{fmt(p2p_fees_hoy_usdt, 4)} USDT`"
     return msg
 
 def analizar_spread_p2p(ban_compra, ban_venta):
@@ -247,6 +269,7 @@ def check_commands():
     global western_rate, last_update_id
     global p2p_venta_abierta, p2p_ganancia_hoy_bs, p2p_fees_hoy_usdt
     global p2p_operaciones_hoy, p2p_ultima_fecha
+    global p2p_capital_inicial_usdt, p2p_capital_actual_usdt
     pedir_tasas = False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
@@ -257,6 +280,7 @@ def check_commands():
         for update in data.get("result", []):
             last_update_id = update["update_id"]
             text = (update.get("message", {}).get("text", "") or "").strip()
+
             if text.lower().startswith("/western"):
                 parts = text.split()
                 if len(parts) >= 2:
@@ -267,8 +291,36 @@ def check_commands():
                         enviar_telegram("⚠️ Formato inválido. Usa: `/western 4.1377`")
                 else:
                     enviar_telegram("⚠️ Ejemplo: `/western 4.1377`")
+
             elif text.lower() == "/tasas":
                 pedir_tasas = True
+
+            elif text.lower().startswith("/capital"):
+                parts = text.split()
+                if len(parts) >= 2:
+                    try:
+                        capital = float(parts[1].replace(",", "."))
+                        p2p_capital_inicial_usdt = capital
+                        p2p_capital_actual_usdt = capital
+                        enviar_telegram(f"✅ *Capital registrado:* `{fmt(capital, 2)} USDT`")
+                    except:
+                        enviar_telegram("⚠️ Formato inválido. Usa: `/capital 100`")
+                else:
+                    enviar_telegram("⚠️ Ejemplo: `/capital 100`")
+
+            elif text.lower() == "/saldo":
+                usdt_hoy = usdt_ganados_hoy()
+                capital_actual = p2p_capital_actual_usdt + usdt_hoy
+                msg  = f"💰 *SALDO P2P*\n\n"
+                msg += f"Capital inicial:   `{fmt(p2p_capital_inicial_usdt, 2)} USDT`\n"
+                msg += f"Ganancia hoy:      `{fmt(usdt_hoy, 4)} USDT`\n"
+                msg += f"Capital actual:    `{fmt(capital_actual, 4)} USDT`\n"
+                if p2p_venta_abierta:
+                    msg += f"\n⏳ *Venta abierta:*\n"
+                    msg += f"  {fmt(p2p_venta_abierta['usdt'], 4)} USDT a {fmt(p2p_venta_abierta['precio_venta'])} Bs\n"
+                    msg += f"  Hora: {p2p_venta_abierta['hora']}\n"
+                enviar_telegram(msg)
+
             elif text.lower().startswith("/vendi"):
                 parts = text.split()
                 if len(parts) >= 4:
@@ -278,7 +330,14 @@ def check_commands():
                         comision = float(parts[3].replace(",", "."))
                         usdt_netos = usdt - comision
                         bs_recibidos = usdt_netos * precio
-                        p2p_venta_abierta = {"usdt": usdt, "usdt_netos": usdt_netos, "precio_venta": precio, "comision": comision, "bs_recibidos": bs_recibidos, "hora": datetime.datetime.now().strftime("%H:%M")}
+                        p2p_venta_abierta = {
+                            "usdt": usdt,
+                            "usdt_netos": usdt_netos,
+                            "precio_venta": precio,
+                            "comision": comision,
+                            "bs_recibidos": bs_recibidos,
+                            "hora": datetime.datetime.now().strftime("%H:%M")
+                        }
                         ban_compra, ban_venta = get_binance_banesco()
                         spread_actual = round((ban_venta or 0) - precio, 2)
                         msg  = f"✅ *Venta registrada*\n\n"
@@ -287,14 +346,17 @@ def check_commands():
                         msg += f"USDT liberados:    `{fmt(usdt_netos, 4)}`\n"
                         msg += f"Precio:            `{fmt(precio)} Bs`\n"
                         msg += f"Bs recibidos:      `{fmt(bs_recibidos)} Bs`\n\n"
-                        msg += f"Compra actual:     `{fmt(ban_compra)} Bs`\n"
-                        msg += f"Spread actual:     `{fmt(spread_actual)} Bs`\n\n"
-                        msg += f"_Registra la compra con /compre USDT PRECIO COMISION_"
+                        msg += f"Venta mercado:     `{fmt(ban_venta)} Bs`\n"
+                        msg += f"Compra mercado:    `{fmt(ban_compra)} Bs`\n"
+                        msg += f"Spread vs mercado: `{fmt(spread_actual)} Bs`\n\n"
+                        msg += f"_Registra la compra con /compre USDT PRECIO COMISION_\n"
+                        msg += f"_Para cancelar usa /cancelar_"
                         enviar_telegram(msg)
                     except:
                         enviar_telegram("⚠️ Formato inválido. Usa: `/vendi 20.24 742.90 0.05`")
                 else:
                     enviar_telegram("⚠️ Ejemplo: `/vendi 20.24 742.90 0.05`")
+
             elif text.lower().startswith("/compre"):
                 parts = text.split()
                 if len(parts) >= 4 and p2p_venta_abierta:
@@ -309,14 +371,23 @@ def check_commands():
                         fees_totales_usdt = p2p_venta_abierta["comision"] + comision
                         p2p_ganancia_hoy_bs += ganancia_bs
                         p2p_fees_hoy_usdt += fees_totales_usdt
-                        p2p_operaciones_hoy.append({"venta": p2p_venta_abierta["precio_venta"], "compra": precio_compra, "usdt": usdt, "ganancia_bs": ganancia_bs})
+                        p2p_operaciones_hoy.append({
+                            "venta": p2p_venta_abierta["precio_venta"],
+                            "compra": precio_compra,
+                            "usdt": usdt,
+                            "ganancia_bs": ganancia_bs,
+                            "fees_usdt": fees_totales_usdt,
+                            "hora": p2p_venta_abierta["hora"]
+                        })
                         p2p_venta_abierta = None
                         usdt_hoy = usdt_ganados_hoy()
                         progreso = min(100, round((usdt_hoy / OBJETIVO_USDT_DIARIO) * 100, 1))
                         barra = "█" * int(progreso / 10) + "░" * (10 - int(progreso / 10))
-                        msg  = f"✅ *Rotación completada*\n\n"
+                        ganancia_signo = "✅" if ganancia_bs >= 0 else "⚠️"
+                        msg  = f"{ganancia_signo} *Rotación completada*\n\n"
                         msg += f"Vendiste:          `{fmt(p2p_operaciones_hoy[-1]['venta'])} Bs`\n"
                         msg += f"Compraste:         `{fmt(precio_compra)} Bs`\n"
+                        msg += f"Spread logrado:    `{fmt(p2p_operaciones_hoy[-1]['venta'] - precio_compra)} Bs`\n"
                         msg += f"USDT recibidos:    `{fmt(usdt_netos, 4)} USDT`\n"
                         msg += f"Bs recibidos:      `{fmt(bs_recibidos)} Bs`\n"
                         msg += f"Bs pagados:        `{fmt(bs_pagados)} Bs`\n"
@@ -329,17 +400,66 @@ def check_commands():
                         enviar_telegram("⚠️ Formato inválido. Usa: `/compre 20.19 737.00 0.05`")
                 elif not p2p_venta_abierta:
                     enviar_telegram("⚠️ No hay venta abierta. Primero usa `/vendi USDT PRECIO COMISION`")
+
+            elif text.lower() == "/cancelar":
+                if p2p_venta_abierta:
+                    msg  = f"🗑 *Venta cancelada*\n\n"
+                    msg += f"Se canceló la venta de `{fmt(p2p_venta_abierta['usdt'], 4)} USDT` a `{fmt(p2p_venta_abierta['precio_venta'])} Bs`\n"
+                    msg += f"Registrada a las {p2p_venta_abierta['hora']}"
+                    p2p_venta_abierta = None
+                    enviar_telegram(msg)
+                else:
+                    enviar_telegram("ℹ️ No hay venta abierta que cancelar.")
+
+            elif text.lower().startswith("/borrar"):
+                parts = text.split()
+                if len(parts) >= 2:
+                    try:
+                        num = int(parts[1])
+                        if 1 <= num <= len(p2p_operaciones_hoy):
+                            op = p2p_operaciones_hoy.pop(num - 1)
+                            p2p_ganancia_hoy_bs -= op["ganancia_bs"]
+                            p2p_fees_hoy_usdt -= op.get("fees_usdt", 0)
+                            enviar_telegram(f"🗑 *Operación {num} eliminada*\nVenta: `{fmt(op['venta'])} Bs` | Compra: `{fmt(op['compra'])} Bs`\nGanancia revertida: `{fmt(op['ganancia_bs'])} Bs`")
+                        else:
+                            enviar_telegram(f"⚠️ Número inválido. Tienes {len(p2p_operaciones_hoy)} operaciones. Usa /historial para ver.")
+                    except:
+                        enviar_telegram("⚠️ Formato inválido. Usa: `/borrar 2` para borrar la operación número 2.")
+                else:
+                    enviar_telegram("⚠️ Indica el número. Usa /historial para ver los números.")
+
+            elif text.lower() == "/reset":
+                p2p_operaciones_hoy = []
+                p2p_ganancia_hoy_bs = 0
+                p2p_fees_hoy_usdt = 0
+                p2p_venta_abierta = None
+                enviar_telegram("🔄 *Historial del día reiniciado.*\nTodas las operaciones fueron borradas.")
+
+            elif text.lower() == "/historial":
+                enviar_telegram(historial_operaciones())
+
             elif text.lower() == "/resumen":
                 enviar_telegram(resumen_diario())
+
             elif text.lower() == "/ayuda":
                 msg  = "📋 *Comandos disponibles*\n\n"
+                msg += "*Tasas:*\n"
                 msg += "`/tasas` — Ver resumen de tasas\n"
-                msg += "`/western TASA` — Actualizar Western\n"
-                msg += "`/vendi USDT PRECIO COMISION` — Registrar venta P2P\n"
-                msg += "`/compre USDT PRECIO COMISION` — Registrar compra P2P\n"
-                msg += "`/resumen` — Ver resumen del día\n"
+                msg += "`/western TASA` — Actualizar Western\n\n"
+                msg += "*P2P Binance:*\n"
+                msg += "`/capital USDT` — Registrar capital inicial\n"
+                msg += "`/vendi USDT PRECIO COMISION` — Registrar venta\n"
+                msg += "`/compre USDT PRECIO COMISION` — Registrar compra\n"
+                msg += "`/cancelar` — Cancelar venta abierta\n"
+                msg += "`/borrar N` — Borrar operación número N\n\n"
+                msg += "*Reportes:*\n"
+                msg += "`/saldo` — Ver capital y saldo actual\n"
+                msg += "`/historial` — Ver todas las operaciones del día\n"
+                msg += "`/resumen` — Ver resumen y progreso del día\n"
+                msg += "`/reset` — Borrar todo el historial del día\n"
                 msg += "`/ayuda` — Ver esta lista"
                 enviar_telegram(msg)
+
     except Exception as e:
         print(f"Error check_commands: {e}")
     return pedir_tasas
