@@ -126,6 +126,10 @@ def init_db():
         fecha_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
         usuario TEXT, accion TEXT, modulo TEXT, registro_id INTEGER,
         valor_anterior TEXT, valor_nuevo TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS saldos_iniciales (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cuenta TEXT UNIQUE, saldo REAL DEFAULT 0,
+        fecha DATE DEFAULT CURRENT_DATE)""")
     conn.commit(); conn.close()
     print("✅ Base de datos lista")
 
@@ -259,6 +263,77 @@ def set_saldo(cuenta, saldo):
     conn.execute("INSERT INTO saldos (cuenta,moneda,saldo) VALUES (?,'',:s) ON CONFLICT(cuenta) DO UPDATE SET saldo=:s,ultima_actualizacion=CURRENT_TIMESTAMP",
                  {'cuenta':cuenta,'s':saldo})
     conn.commit(); conn.close()
+
+
+def set_saldo_inicial(cuenta, saldo):
+    """Establece el saldo inicial de una cuenta y recalcula el actual."""
+    conn = get_conn(); c = conn.cursor()
+    # Save initial balance
+    c.execute("""
+        INSERT INTO saldos_iniciales (cuenta, saldo, fecha)
+        VALUES (?, ?, date('now'))
+        ON CONFLICT(cuenta) DO UPDATE SET saldo=excluded.saldo, fecha=excluded.fecha
+    """, (cuenta, saldo))
+    # Recalculate current balance: initial + all operations
+    # Get net movement from operations
+    movimiento = _calcular_movimiento_cuenta(c, cuenta)
+    saldo_actual = saldo + movimiento
+    c.execute("""
+        UPDATE saldos SET saldo=?, ultima_actualizacion=CURRENT_TIMESTAMP
+        WHERE cuenta=?
+    """, (saldo_actual, cuenta))
+    conn.commit(); conn.close()
+
+def _calcular_movimiento_cuenta(c, cuenta):
+    """Calcula el movimiento neto de una cuenta desde las operaciones."""
+    mapa_entrada = {
+        'BS_BANESCO': ["USDT→BS","COP→BS","USD→BS"],
+        'BS_MERCANTIL': [],
+        'CLP_COPEC_PAY': ["BS→CLP","USDT→CLP","USD→CLP"],
+        'COP_EFECTIVO_ORLANDO': ["BS→COP","CLP→COP"],
+        'USDT_BINANCE': ["BS→USDT","CLP→USDT"],
+        'USD_EFECTIVO': ["BS→USD","CLP→USD"],
+    }
+    mapa_salida = {
+        'BS_BANESCO': ["BS→CLP","BS→COP","BS→USDT","BS→USD"],
+        'CLP_COPEC_PAY': ["CLP→BS","CLP→COP","CLP→USDT","CLP→USD"],
+        'COP_EFECTIVO_ORLANDO': ["COP→BS","COP→CLP"],
+        'USDT_BINANCE': ["USDT→BS","USDT→CLP"],
+        'USD_EFECTIVO': ["USD→BS","USD→CLP"],
+    }
+    entradas = mapa_entrada.get(cuenta, [])
+    salidas  = mapa_salida.get(cuenta, [])
+    total = 0.0
+    if entradas:
+        placeholders = ",".join(["?"]*len(entradas))
+        rows = c.execute(f"SELECT COALESCE(SUM(monto_salida),0) FROM operaciones WHERE tipo_op IN ({placeholders}) AND estado='Completada'", entradas).fetchone()
+        total += rows[0] if rows else 0
+    if salidas:
+        placeholders = ",".join(["?"]*len(salidas))
+        rows = c.execute(f"SELECT COALESCE(SUM(monto_entrada),0) FROM operaciones WHERE tipo_op IN ({placeholders}) AND estado='Completada'", salidas).fetchone()
+        total -= rows[0] if rows else 0
+    return total
+
+def msg_saldos_iniciales():
+    """Muestra los saldos iniciales configurados."""
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT cuenta, saldo, fecha FROM saldos_iniciales ORDER BY cuenta").fetchall()
+        if not rows:
+            return "No hay saldos iniciales configurados.\n\nUsa: `/saldo_inicial BS_BANESCO 303581.42`"
+        m = "📋 *SALDOS INICIALES*\n\n"
+        for row in rows:
+            nombre = NOMBRES_CUENTAS.get(row[0] if isinstance(row, tuple) else row['cuenta'], row[0] if isinstance(row, tuple) else row['cuenta'])
+            saldo = row[1] if isinstance(row, tuple) else row['saldo']
+            fecha = row[2] if isinstance(row, tuple) else row['fecha']
+            m += f"`{nombre}`: `{saldo:,.2f}` (desde {fecha})\n"
+        m += "\n_Usa /saldo_inicial CUENTA MONTO para corregir_"
+        return m
+    except:
+        return "Tabla de saldos iniciales no encontrada."
+    finally:
+        conn.close()
+
 
 def get_cuentas_pendientes(tipo=None):
     conn = get_conn()
@@ -574,7 +649,7 @@ def formatear_importacion(resultado):
 conversaciones = {}
 
 def iniciar_operacion(chat_id):
-    conversaciones[chat_id] = {'paso':0,'datos':{
+    conversaciones[chat_id] = {'paso':-1,'datos':{
         'fecha':str(datetime.date.today()),
         'hora':datetime.datetime.now().strftime("%H:%M"),
         'usuario_telegram':str(chat_id),'estado':'Completada',
@@ -590,6 +665,29 @@ def procesar_conv(chat_id, texto):
     conv=conversaciones[chat_id]; paso=conv['paso']; datos=conv['datos']
     if texto.lower() in ('/cancelar','cancelar'):
         del conversaciones[chat_id]; return "❌ Operación cancelada."
+
+    if paso==-1:
+        hoy = datetime.date.today()
+        ayer = hoy - datetime.timedelta(days=1)
+        if texto.lower() in ('hoy','today','h'):
+            datos['fecha'] = str(hoy)
+        elif texto.lower() in ('ayer','yesterday','a'):
+            datos['fecha'] = str(ayer)
+        else:
+            try:
+                # Try DD/MM/YYYY or YYYY-MM-DD
+                for fmt in ('%d/%m/%Y','%Y-%m-%d','%d-%m-%Y'):
+                    try:
+                        dt = datetime.datetime.strptime(texto, fmt)
+                        datos['fecha'] = dt.strftime('%Y-%m-%d')
+                        break
+                    except: pass
+                else:
+                    return "⚠️ Formato inválido. Escribe *hoy*, *ayer*, o una fecha como `05/06/2026`"
+            except: return "⚠️ Fecha inválida."
+        conv['paso'] = 0
+        tipos = "\n".join([f"  `{t}`" for t in TIPOS_OP])
+        return f"💱 *NUEVA OPERACIÓN*\nFecha: `{datos['fecha']}`\n\n¿Tipo de operación?\n\n{tipos}\n\n_/cancelar para salir_"
 
     if paso==0:
         if texto not in TIPOS_OP: return "⚠️ Selecciona un tipo válido de la lista."
@@ -935,6 +1033,47 @@ def procesar(chat_id, texto):
         for r in regs: m+=f"`{r['fecha_hora'][:16]}` {r['accion']} — {r['modulo']}\n"
         send(chat_id,m)
 
+
+    elif cmd == '/setsaldo':
+        # /setsaldo CUENTA MONTO
+        if len(partes) >= 3:
+            try:
+                cuenta = partes[1].upper()
+                monto = float(partes[2].replace(',','.'))
+                if cuenta not in NOMBRES_CUENTAS:
+                    cuentas_lista = "\n".join([f"  `{k}`" for k in NOMBRES_CUENTAS.keys()])
+                    send(chat_id, f"⚠️ Cuenta no válida. Opciones:\n{cuentas_lista}")
+                else:
+                    set_saldo(cuenta, monto)
+                    nombre = NOMBRES_CUENTAS[cuenta]
+                    send(chat_id, f"✅ Saldo actualizado\n`{nombre}`: `{monto:,.2f}`\n\n_Saldo actual corregido a este valor_")
+            except:
+                send(chat_id, "Uso: `/setsaldo BS_BANESCO 125430`")
+        else:
+            cuentas_lista = "\n".join([f"  `{k}`" for k in NOMBRES_CUENTAS.keys()])
+            send(chat_id, f"Uso: `/setsaldo CUENTA MONTO`\n\nCuentas disponibles:\n{cuentas_lista}")
+
+    elif cmd == '/saldo_inicial':
+        # /saldo_inicial CUENTA MONTO - sets the baseline without affecting operations
+        if len(partes) >= 3:
+            try:
+                cuenta = partes[1].upper()
+                monto = float(partes[2].replace(',','.'))
+                if cuenta not in NOMBRES_CUENTAS:
+                    send(chat_id, "⚠️ Cuenta no válida. Usa /setsaldo para ver las opciones.")
+                else:
+                    # Store as initial balance
+                    set_saldo_inicial(cuenta, monto)
+                    nombre = NOMBRES_CUENTAS[cuenta]
+                    send(chat_id, f"✅ Saldo inicial registrado\n`{nombre}`: `{monto:,.2f}`\n\n_El sistema recalcula automáticamente desde este punto_")
+            except:
+                send(chat_id, "Uso: `/saldo_inicial BS_BANESCO 303581.42`")
+        else:
+            send(chat_id, "Uso: `/saldo_inicial CUENTA MONTO`\n\nEjemplo: `/saldo_inicial BS_BANESCO 303581.42`")
+
+    elif cmd == '/saldos_iniciales':
+        send(chat_id, msg_saldos_iniciales())
+
     elif cmd in ('/ayuda','/start','/help'):
         send(chat_id,"""🤖 *GSA CAMBIOS — COMANDOS*
 
@@ -952,6 +1091,11 @@ def procesar(chat_id, texto):
 
 *📋 PENDIENTES*
 /cxc | /cxp | /cobrado ID | /pagado ID
+
+*💼 SALDOS*
+/saldo_inicial CUENTA MONTO
+/setsaldo CUENTA MONTO
+/saldos_iniciales
 
 *⚙️ SISTEMA*
 /importar | /sync | /auditoria | /ayuda""")
