@@ -1177,6 +1177,20 @@ def get_updates(offset=0):
         return r.json().get("result",[])
     except: return []
 
+def download_file(file_id: str) -> bytes:
+    """Descarga un archivo de Telegram y retorna los bytes."""
+    try:
+        r = requests.get(f"{BASE_URL}/getFile",
+                        params={"file_id": file_id}, timeout=10)
+        file_path = r.json()["result"]["file_path"]
+        r2 = requests.get(
+            f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}",
+            timeout=30)
+        return r2.content
+    except Exception as e:
+        print(f"Error descargando archivo: {e}")
+        return None
+
 ultimo_offset=0; western_rate=None; ultimo_spread=0; ultimo_datos={}
 esperando_importar={}
 
@@ -1391,6 +1405,43 @@ def loop_csv():
 # ══════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════
+def procesar_documento(chat_id: str, file_id: str, nombre: str):
+    """Procesa un documento recibido por Telegram."""
+    nombre_lower = nombre.lower()
+
+    # Solo procesar archivos Excel o CSV de Binance
+    if not (nombre_lower.endswith('.xlsx') or nombre_lower.endswith('.csv')):
+        send(chat_id, f"⚠️ Solo acepto archivos .xlsx o .csv\nRecibí: `{nombre}`")
+        return
+
+    send(chat_id, f"⏳ Procesando `{nombre}`...\nDetectando sesiones automáticamente...")
+
+    # Descargar el archivo
+    contenido = download_file(file_id)
+    if not contenido:
+        send(chat_id, "❌ No pude descargar el archivo. Intenta de nuevo.")
+        return
+
+    # Guardar temporalmente
+    import tempfile
+    sufijo = '.xlsx' if nombre_lower.endswith('.xlsx') else '.csv'
+    with tempfile.NamedTemporaryFile(delete=False, suffix=sufijo) as tmp:
+        tmp.write(contenido)
+        ruta_tmp = tmp.name
+
+    try:
+        # Procesar con el importador inteligente
+        resultado = importar_c2c_inteligente(ruta_tmp, DB_PATH, str(chat_id))
+        msg = formatear_resultado_inteligente(resultado)
+        send(chat_id, msg)
+    except Exception as e:
+        send(chat_id, f"❌ Error procesando el archivo: {e}")
+    finally:
+        # Limpiar archivo temporal
+        try:
+            os.remove(ruta_tmp)
+        except: pass
+
 def main():
     global ultimo_offset
     print("="*50)
@@ -1416,7 +1467,14 @@ def main():
                     msg=update["message"]
                     chat_id=str(msg["chat"]["id"])
                     texto=msg.get("text","")
-                    if texto: procesar(chat_id, texto)
+                    # Manejar documentos (archivos enviados)
+                    if "document" in msg:
+                        doc = msg["document"]
+                        nombre = doc.get("file_name","archivo")
+                        file_id = doc.get("file_id")
+                        procesar_documento(chat_id, file_id, nombre)
+                    elif texto:
+                        procesar(chat_id, texto)
         except Exception as e: print(f"Error main: {e}"); time.sleep(5)
 
 if __name__=="__main__":
