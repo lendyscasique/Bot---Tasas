@@ -3,3 +3,4 @@ beautifulsoup4
 Pillow
 pytz
 openpyxl
+psycopg2-binary
