@@ -1431,11 +1431,29 @@ def procesar_documento(chat_id: str, file_id: str, nombre: str):
             ruta_tmp = tmp.name
 
     try:
+        # Debug: verify file is readable
+        from openpyxl import load_workbook as _lwb
+        _wb = _lwb(ruta_tmp, data_only=True)
+        _ws = _wb.active
+        _filas = _ws.max_row
+        send(chat_id, f"📋 Archivo leído: `{_filas}` filas")
+        
+        # Count completed orders
+        _completadas = 0
+        _total = 0
+        for _row in _ws.iter_rows(min_row=11, values_only=True):
+            if _row[2]:
+                _total += 1
+                _st = str(_row[13]).strip().strip("'") if _row[13] else ''
+                if _st == 'Completed': _completadas += 1
+        send(chat_id, f"📊 Órdenes encontradas: `{_total}` total | `{_completadas}` completadas")
+        
         resultado = importar_c2c_inteligente(ruta_tmp, DB_PATH, str(chat_id))
         msg = formatear_resultado_inteligente(resultado)
         send(chat_id, msg)
     except Exception as e:
-        send(chat_id, f"❌ Error procesando: {e}")
+        import traceback
+        send(chat_id, f"❌ Error: `{e}`\n```{traceback.format_exc()[-300:]}```")
     finally:
         try: os.remove(ruta_tmp)
         except: pass
