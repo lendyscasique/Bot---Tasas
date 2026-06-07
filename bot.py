@@ -2133,4 +2133,176 @@ def loop_mercado():
             # Alerta BS si spread >= 10 y cambió >= 2 Bs
             if compras_bs and ventas_bs:
                 spread = ventas_bs[0]['precio'] - compras_bs[0]['precio']
-                prec
+                precio_venta = ventas_bs[0]['precio']
+                if spread >= SPREAD_MIN_ALERTA and abs(precio_venta - ultimo_precio_bs_venta) >= SPREAD_CAMBIO_BS:
+                    send(TELEGRAM_CHAT_ID, msg_alerta_bs(compras_bs, ventas_bs, spread))
+                    ultimo_precio_bs_venta = precio_venta
+
+                    # Verificar arbitraje triangular si hay datos CLP
+                    if clp_ads and ultimo_datos:
+                        alerta_tri = msg_alerta_triangular(500000, clp_ads, ventas_bs, ultimo_datos)
+                        if alerta_tri:
+                            send(TELEGRAM_CHAT_ID, alerta_tri)
+
+            # Alerta CLP si cambió >= 5 CLP
+            if clp_ads:
+                precio_clp = clp_ads[0]['precio']
+                if abs(precio_clp - ultimo_precio_clp) >= CAMBIO_MIN_CLP:
+                    send(TELEGRAM_CHAT_ID, msg_alerta_clp(clp_ads))
+                    ultimo_precio_clp = precio_clp
+
+        except Exception as e:
+            print(f"Error loop_mercado: {e}")
+
+        time.sleep(INTERVALO_MERCADO_SEG)
+
+def loop_western_reminder():
+    """Recuerda actualizar Western Union a las 10 AM si no fue actualizado."""
+    print("▶ Loop western reminder iniciado")
+    western_alertado_hoy = None
+
+    while True:
+        try:
+            ahora = now_local()
+            hoy = str(ahora.date())
+            hora = ahora.hour
+
+            if hora == 10 and western_alertado_hoy != hoy:
+                western_actualizado = get_config('western_actualizado_hoy', '')
+                if western_actualizado != hoy:
+                    send(TELEGRAM_CHAT_ID,
+                         "⚠️ *WESTERN UNION SIN ACTUALIZAR*\n\n"
+                         "No has registrado la tasa Western de hoy.\n"
+                         "Usa: `/western 0.0042`\n\n"
+                         "_La tasa Western afecta los límites CLP/COP_")
+                    western_alertado_hoy = hoy
+        except Exception as e:
+            print(f"Error western reminder: {e}")
+
+        time.sleep(300)  # Revisar cada 5 min
+
+def loop_reporte_diario():
+    """Envía reporte de análisis todos los días a las 11 PM."""
+    print("▶ Loop reporte diario iniciado")
+    reporte_enviado_hoy = None
+
+    while True:
+        try:
+            ahora = now_local()
+            hoy = str(ahora.date())
+            hora = ahora.hour
+
+            if hora == 23 and reporte_enviado_hoy != hoy:
+                send(TELEGRAM_CHAT_ID, generar_reporte_diario())
+                reporte_enviado_hoy = hoy
+        except Exception as e:
+            print(f"Error reporte diario: {e}")
+
+        time.sleep(300)
+
+def loop_reporte_semanal():
+    """Envía reporte semanal los domingos a las 8 PM."""
+    print("▶ Loop reporte semanal iniciado")
+    reporte_enviado_semana = None
+
+    while True:
+        try:
+            ahora = now_local()
+            semana = ahora.strftime('%Y-W%W')
+            hora = ahora.hour
+            dia_semana = ahora.weekday()  # 6 = domingo
+
+            if dia_semana == 6 and hora == 20 and reporte_enviado_semana != semana:
+                send(TELEGRAM_CHAT_ID, generar_reporte_semanal())
+                reporte_enviado_semana = semana
+        except Exception as e:
+            print(f"Error reporte semanal: {e}")
+
+        time.sleep(600)
+
+def loop_gestor_capital():
+    """Revisa capital y alerta si hay desbalance o liquidez crítica cada 15 min."""
+    print("▶ Loop gestor de capital iniciado")
+    time.sleep(60)
+
+    while True:
+        try:
+            analisis = analizar_capital()
+            alertas_criticas = [a for a in analisis['alertas'] if a['tipo'] == 'umbral']
+
+            if alertas_criticas:
+                m = "🚨 *ALERTA DE LIQUIDEZ*\n\n"
+                for a in alertas_criticas:
+                    m += f"🔴 *{a['cuenta']}*\n"
+                    m += f"   Saldo: `{a['saldo']:,.2f} {a['moneda']}`\n"
+                    m += f"   Mínimo: `{a['umbral']:,.2f} {a['moneda']}`\n\n"
+                m += "_Usa /capital para análisis completo_"
+                send(TELEGRAM_CHAT_ID, m)
+        except Exception as e:
+            print(f"Error gestor capital: {e}")
+
+        time.sleep(INTERVALO_LIQUIDEZ_SEG)
+
+def loop_csv():
+    print("▶ Loop CSV iniciado")
+    while True:
+        try: exportar_csv()
+        except Exception as e: print(f"Error CSV: {e}")
+        time.sleep(INTERVALO_CSV_SEG)
+
+# ══════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════
+def main():
+    global ultimo_offset
+    print("="*50)
+    print("   GSA CAMBIOS — BOT v6.0 INICIANDO")
+    print("="*50)
+    print(f"DB: {DB_PATH}")
+    print(f"Supabase: {'ACTIVADO ✅' if USE_SUPABASE else 'DESACTIVADO ❌'}")
+    print(f"Zona horaria: UTC{UTC_OFFSET}")
+
+    init_db(); init_saldos()
+
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ TELEGRAM_BOT_TOKEN no configurado"); return
+
+    # Iniciar todos los loops
+    threading.Thread(target=loop_tasas,          daemon=True).start()
+    threading.Thread(target=loop_mercado,         daemon=True).start()
+    threading.Thread(target=loop_western_reminder,daemon=True).start()
+    threading.Thread(target=loop_reporte_diario,  daemon=True).start()
+    threading.Thread(target=loop_reporte_semanal, daemon=True).start()
+    threading.Thread(target=loop_gestor_capital,  daemon=True).start()
+    threading.Thread(target=loop_csv,             daemon=True).start()
+
+    supa_msg = "✅ Supabase conectado" if USE_SUPABASE else "⚠️ Supabase no configurado"
+    send(TELEGRAM_CHAT_ID,
+         f"✅ *GSA Cambios Bot v6.0 iniciado*\n"
+         f"{supa_msg}\n"
+         f"📡 Monitoreo de mercado activo\n"
+         f"📊 Historial de precios activado\n"
+         f"💼 Gestor de capital activo\n\n"
+         f"Usa /ayuda para ver los comandos.")
+
+    print("\n✅ Bot v6.0 corriendo...\n")
+
+    while True:
+        try:
+            updates = get_updates(ultimo_offset)
+            for update in updates:
+                ultimo_offset = update["update_id"] + 1
+                if "message" in update:
+                    msg = update["message"]
+                    chat_id = str(msg["chat"]["id"])
+                    texto = msg.get("text", "")
+                    if "document" in msg:
+                        doc = msg["document"]
+                        procesar_documento(chat_id, doc.get("file_id"), doc.get("file_name","archivo"))
+                    elif texto:
+                        procesar(chat_id, texto)
+        except Exception as e:
+            print(f"Error main: {e}"); time.sleep(5)
+
+if __name__ == "__main__":
+    main()
