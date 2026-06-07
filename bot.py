@@ -624,6 +624,20 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
     taker_ops = [o for o in ordenes if o['is_taker']]
     clp_ops   = [o for o in ordenes if o['fiat']=='CLP' and not o['is_taker']]
 
+    # Debug: log counts to SQLite for retrieval
+    conn_debug = sqlite3.connect(db_path)
+    conn_debug.execute("""CREATE TABLE IF NOT EXISTS debug_log
+        (id INTEGER PRIMARY KEY AUTOINCREMENT, ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+         msg TEXT)""")
+    conn_debug.execute("INSERT INTO debug_log (msg) VALUES (?)",
+        (f"ordenes={len(ordenes)} maker_ves={len(maker_ves)} taker={len(taker_ops)} clp={len(clp_ops)}",))
+    if ordenes:
+        o = ordenes[0]
+        conn_debug.execute("INSERT INTO debug_log (msg) VALUES (?)",
+            (f"first_order: num={o['num']} tipo={o['tipo']} fiat={o['fiat']} is_maker={o['is_maker']} is_taker={o['is_taker']} maker_fee={o['maker_fee']} taker_fee={o['taker_fee']}",))
+    conn_debug.commit()
+    conn_debug.close()
+
     # ── Detect sessions ───────────────────────────────────────────────
     sesiones_raw = []
     if maker_ves:
@@ -1295,6 +1309,21 @@ def procesar(chat_id, texto):
     elif cmd == '/version':
         send(chat_id, "🤖 *GSA Cambios Bot v5.0*\nImportador inteligente Maker/Taker activo")
 
+    elif cmd == '/debuglog':
+        try:
+            conn_dl = sqlite3.connect(DB_PATH)
+            rows = conn_dl.execute("SELECT ts, msg FROM debug_log ORDER BY id DESC LIMIT 5").fetchall()
+            conn_dl.close()
+            if rows:
+                msg = "🔍 *DEBUG LOG*\n\n"
+                for ts, m in rows:
+                    msg += f"`{ts[:16]}` {m}\n\n"
+                send(chat_id, msg)
+            else:
+                send(chat_id, "Sin logs de debug aún.")
+        except Exception as e:
+            send(chat_id, f"❌ {e}")
+
     elif cmd in ('/ayuda','/start','/help'):
         send(chat_id,"""🤖 *GSA CAMBIOS — COMANDOS*
 
@@ -1458,6 +1487,13 @@ def procesar_documento(chat_id: str, file_id: str, nombre: str):
             send(chat_id, f"📂 Tablas: `{_tables}`")
         except Exception as _de:
             send(chat_id, f"❌ DB Error: `{_de}`")
+
+        # Test _clean_float directly
+        try:
+            test_val = _clean_float("727.5")
+            send(chat_id, f"✅ _clean_float test: `{test_val}`")
+        except Exception as _cfe:
+            send(chat_id, f"❌ _clean_float error: `{_cfe}`")
 
         resultado = importar_c2c_inteligente(ruta_tmp, DB_PATH, str(chat_id))
         send(chat_id, f"🔍 Debug resultado: importadas={resultado.get('importadas_maker',0)} taker={resultado.get('importadas_taker',0)} err={resultado.get('errores',0)} omit={resultado.get('omitidas',0)}")
