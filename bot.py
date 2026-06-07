@@ -20,6 +20,67 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 DB_PATH            = os.getenv("GSA_DB_PATH", "gsa_cambios.db")
 CSV_EXPORT_PATH    = os.getenv("GSA_CSV_PATH", "csv_export")
 
+# ══════════════════════════════════════════════════════════════════════
+# SUPABASE
+# ══════════════════════════════════════════════════════════════════════
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+USE_SUPABASE = bool(SUPABASE_URL and SUPABASE_KEY)
+
+print(f"🔗 Supabase: {'ACTIVADO' if USE_SUPABASE else 'DESACTIVADO'}")
+
+def supa_insert(tabla, datos):
+    if not USE_SUPABASE: return None
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/{tabla}",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            },
+            json=datos, timeout=10)
+        if r.status_code not in (200, 201):
+            print(f"Supabase insert warn ({tabla}): {r.status_code} {r.text[:100]}")
+        return r
+    except Exception as e:
+        print(f"Supabase insert error ({tabla}): {e}")
+        return None
+
+def supa_select(tabla, query=""):
+    if not USE_SUPABASE: return []
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{tabla}?{query}",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}"
+            }, timeout=10)
+        return r.json() if r.status_code == 200 else []
+    except Exception as e:
+        print(f"Supabase select error ({tabla}): {e}")
+        return []
+
+def supa_update(tabla, campo, valor, datos):
+    if not USE_SUPABASE: return None
+    try:
+        r = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/{tabla}?{campo}=eq.{valor}",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json"
+            },
+            json=datos, timeout=10)
+        return r
+    except Exception as e:
+        print(f"Supabase update error ({tabla}): {e}")
+        return None
+
+# ══════════════════════════════════════════════════════════════════════
+# FEES Y SPREADS
+# ══════════════════════════════════════════════════════════════════════
 FEE_USDT_BS  = 0.0025
 FEE_USDT_CLP = 0.002
 FEE_WU       = 0.025
@@ -171,9 +232,8 @@ def get_ultima_tasa():
     return dict(row) if row else {}
 
 def guardar_tasa(datos):
-    # Save to Supabase if available
     if USE_SUPABASE:
-        supa_insert('tasas', {k: v for k, v in datos.items() 
+        supa_insert('tasas', {k: v for k, v in datos.items()
                               if k != 'mejor_banco' and v is not None})
     conn = get_conn(); c = conn.cursor()
     c.execute("""INSERT INTO tasas (
@@ -194,10 +254,9 @@ def guardar_tasa(datos):
     conn.commit(); conn.close()
 
 def guardar_operacion(datos):
-    # Save to Supabase if available
     if USE_SUPABASE:
-        supa_data = {k: str(v) if isinstance(v, (dict,list)) else v 
-                     for k, v in datos.items() 
+        supa_data = {k: str(v) if isinstance(v, (dict,list)) else v
+                     for k, v in datos.items()
                      if k not in ('_tasa_sug','_mto_sal_sug','estado') and v is not None}
         supa_data['estado'] = datos.get('estado', 'Completada')
         supa_insert('operaciones', supa_data)
@@ -276,18 +335,13 @@ def set_saldo(cuenta, saldo):
                  {'cuenta':cuenta,'s':saldo})
     conn.commit(); conn.close()
 
-
 def set_saldo_inicial(cuenta, saldo):
-    """Establece el saldo inicial de una cuenta y recalcula el actual."""
     conn = get_conn(); c = conn.cursor()
-    # Save initial balance
     c.execute("""
         INSERT INTO saldos_iniciales (cuenta, saldo, fecha)
         VALUES (?, ?, date('now'))
         ON CONFLICT(cuenta) DO UPDATE SET saldo=excluded.saldo, fecha=excluded.fecha
     """, (cuenta, saldo))
-    # Recalculate current balance: initial + all operations
-    # Get net movement from operations
     movimiento = _calcular_movimiento_cuenta(c, cuenta)
     saldo_actual = saldo + movimiento
     c.execute("""
@@ -297,7 +351,6 @@ def set_saldo_inicial(cuenta, saldo):
     conn.commit(); conn.close()
 
 def _calcular_movimiento_cuenta(c, cuenta):
-    """Calcula el movimiento neto de una cuenta desde las operaciones."""
     mapa_entrada = {
         'BS_BANESCO': ["USDT→BS","COP→BS","USD→BS"],
         'BS_MERCANTIL': [],
@@ -327,7 +380,6 @@ def _calcular_movimiento_cuenta(c, cuenta):
     return total
 
 def msg_saldos_iniciales():
-    """Muestra los saldos iniciales configurados."""
     conn = get_conn()
     try:
         rows = conn.execute("SELECT cuenta, saldo, fecha FROM saldos_iniciales ORDER BY cuenta").fetchall()
@@ -345,7 +397,6 @@ def msg_saldos_iniciales():
         return "Tabla de saldos iniciales no encontrada."
     finally:
         conn.close()
-
 
 def get_cuentas_pendientes(tipo=None):
     conn = get_conn()
@@ -382,7 +433,6 @@ def get_operaciones_hoy():
     return [dict(r) for r in rows]
 
 def get_auditoria(limite=10):
-    # Try Supabase first
     if USE_SUPABASE:
         rows = supa_select('auditoria', f'order=fecha_hora.desc&limit={limite}')
         if rows: return rows
@@ -561,14 +611,10 @@ def analizar_spread(mejor_banco, compra, venta, spread, ultimo):
 # ══════════════════════════════════════════════════════════════════════
 PAUSA_SESION_MIN = 45
 
-PAUSA_SESION_MIN = 45  # gap > 45 min entre órdenes = nueva sesión
-
 def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
-    """Importador inteligente Binance C2C con detección Maker/Taker y sesiones."""
     import sqlite3 as _sq3
     from datetime import datetime as _dt
 
-    # Step 1: Init DB connection
     _conn = _sq3.connect(db_path)
     _conn.execute("""CREATE TABLE IF NOT EXISTS debug_log
         (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -596,7 +642,6 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
         try: return float(s.replace(',','')) if s else 0.0
         except: return 0.0
 
-    # Step 2: Open file
     try:
         from openpyxl import load_workbook as _lw
         _wb = _lw(ruta_archivo, data_only=True)
@@ -609,7 +654,6 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
                 'importadas_clp':0,'omitidas':0,'errores':0,'sesiones':[],
                 'total_ganancia_bs':0,'total_ganancia_u':0,'usdt_pendiente':0,'fees_total':0}
 
-    # Step 3: Find header
     _header = 11
     for _i, _row in enumerate(_ws.iter_rows(values_only=True), 1):
         for _v in _row:
@@ -618,7 +662,6 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
         if _header != 11: break
     _log(f"header_row: {_header}")
 
-    # Step 4: Parse orders
     _ordenes = []
     _skip_status = 0; _skip_date = 0; _skip_nonum = 0
     for _row in _ws.iter_rows(min_row=_header, values_only=True):
@@ -641,13 +684,11 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
         })
     _log(f"parsed: total={len(_ordenes)} skip_st={_skip_status} skip_dt={_skip_date} skip_nn={_skip_nonum}")
 
-    # Step 5: Separate
     _maker = [o for o in _ordenes if o['fiat']=='VES' and o['is_maker']]
     _taker = [o for o in _ordenes if o['is_taker']]
     _clp   = [o for o in _ordenes if o['fiat']=='CLP' and not o['is_taker']]
     _log(f"separated: maker_ves={len(_maker)} taker={len(_taker)} clp={len(_clp)}")
 
-    # Step 6: Detect sessions
     _sesiones_raw = []
     if _maker:
         _sa = [_maker[0]]
@@ -658,7 +699,6 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
         if _sa: _sesiones_raw.append(_sa)
     _log(f"sessions: {len(_sesiones_raw)}")
 
-    # Step 7: Save sessions and orders
     _imp=0; _omit=0; _err=0; _ses_saved=[]
     for _ns, _ords in enumerate(_sesiones_raw, 1):
         _comp = [o for o in _ords if o['tipo']=='Buy']
@@ -704,7 +744,6 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
                  round(_gb,2),round(_gu,4),round(_pend,4),round(_fees,4),_est))
         _conn.commit()
 
-        # Also save session to Supabase
         if USE_SUPABASE:
             ses_data = {
                 'sesion': _sl, 'fecha': _fd,
@@ -717,9 +756,7 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
                 'usdt_pendiente': round(_pend,4), 'fees_usdt': round(_fees,4),
                 'estado': _est
             }
-            # Check if exists
-            existing = supa_select('binance_sesiones', 
-                                   f'sesion=eq.{_sl}&fecha=eq.{_fd}')
+            existing = supa_select('binance_sesiones', f'sesion=eq.{_sl}&fecha=eq.{_fd}')
             if existing:
                 supa_update('binance_sesiones', 'sesion', _sl, ses_data)
             else:
@@ -746,7 +783,6 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
                      f'Binance Maker — {_sl}','Completada',
                      f'Orden #{_o["num"]} | {_sl}',usuario))
                 _imp+=1
-                # Save to Supabase
                 if USE_SUPABASE:
                     supa_insert('operaciones', {
                         'fecha': _o['dt'].strftime('%Y-%m-%d'),
@@ -774,7 +810,6 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
 
     _log(f"done: imp={_imp} omit={_omit} err={_err} sessions={len(_ses_saved)}")
 
-    # Process Taker
     _timp=0
     for _o in _taker:
         _ex = _conn.execute("SELECT id FROM operaciones WHERE observaciones LIKE ?",
@@ -802,7 +837,6 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
             _timp+=1
         except: pass
 
-    # Process CLP
     _cimp=0
     for _o in _clp:
         _ex = _conn.execute("SELECT id FROM operaciones WHERE observaciones LIKE ?",
@@ -842,7 +876,6 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
 def formatear_resultado_inteligente(resultado):
     if 'error' in resultado: return f"❌ Error: {resultado['error']}"
     ses = resultado['sesiones']
-    # Show only last 10 sessions to avoid message too long
     ses_mostrar = ses[-10:] if len(ses) > 10 else ses
     m  = f"✅ *IMPORTACIÓN BINANCE C2C*\n\n"
     if len(ses) > 10:
@@ -905,10 +938,9 @@ def procesar_conv(chat_id, texto):
             datos['fecha'] = str(ayer)
         else:
             try:
-                # Try DD/MM/YYYY or YYYY-MM-DD
-                for fmt in ('%d/%m/%Y','%Y-%m-%d','%d-%m-%Y'):
+                for fmt_str in ('%d/%m/%Y','%Y-%m-%d','%d-%m-%Y'):
                     try:
-                        dt = datetime.datetime.strptime(texto, fmt)
+                        dt = datetime.datetime.strptime(texto, fmt_str)
                         datos['fecha'] = dt.strftime('%Y-%m-%d')
                         break
                     except: pass
@@ -1124,7 +1156,7 @@ def msg_cxp():
     return m
 
 # ══════════════════════════════════════════════════════════════════════
-# EXPORTAR CSV PARA EXCEL
+# EXPORTAR CSV
 # ══════════════════════════════════════════════════════════════════════
 def exportar_csv():
     os.makedirs(CSV_EXPORT_PATH, exist_ok=True)
@@ -1160,10 +1192,8 @@ def get_updates(offset=0):
     except: return []
 
 def download_file(file_id: str) -> bytes:
-    """Descarga un archivo de Telegram y retorna los bytes."""
     try:
-        r = requests.get(f"{BASE_URL}/getFile",
-                        params={"file_id": file_id}, timeout=10)
+        r = requests.get(f"{BASE_URL}/getFile", params={"file_id": file_id}, timeout=10)
         file_path = r.json()["result"]["file_path"]
         r2 = requests.get(
             f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}",
@@ -1179,17 +1209,14 @@ esperando_importar={}
 def procesar(chat_id, texto):
     global western_rate, ultimo_datos
 
-    # Conversación activa de operación
     if hay_conv_activa(chat_id) and not texto.startswith('/'):
         send(chat_id, procesar_conv(chat_id, texto)); return
 
-    # Esperando nombre de archivo para importar
     if chat_id in esperando_importar and not texto.startswith('/'):
         archivo=texto.strip()
         ruta=os.path.join(os.path.dirname(DB_PATH), archivo)
         if not os.path.exists(ruta):
-            ruta=os.path.join(CSV_EXPORT_PATH,'..', archivo)
-            ruta=os.path.abspath(ruta)
+            ruta=os.path.abspath(os.path.join(CSV_EXPORT_PATH,'..', archivo))
         send(chat_id, f"⏳ Procesando `{archivo}`...")
         resultado=importar_c2c_inteligente(ruta, DB_PATH, str(chat_id))
         send(chat_id, formatear_resultado_inteligente(resultado))
@@ -1198,7 +1225,6 @@ def procesar(chat_id, texto):
     partes=texto.split(); cmd=partes[0].lower() if partes else ''
 
     if cmd=='/tasas':
-        global western_rate
         send(chat_id,"⏳ Consultando tasas...")
         datos=consultar_y_guardar(western_rate); ultimo_datos=datos
         send(chat_id, construir_mensaje(datos))
@@ -1239,7 +1265,7 @@ def procesar(chat_id, texto):
     elif cmd=='/caja': send(chat_id, msg_saldos())
     elif cmd=='/posicion': send(chat_id, msg_saldos())
     elif cmd=='/dashboard': send(chat_id, msg_dashboard())
-    elif cmd=='/resultado': 
+    elif cmd=='/resultado':
         d=get_resultados_mes()
         send(chat_id,f"💵 *P&L MES*\nOps: `{d['ops']}` | Vol: `{d['volumen']:.4f}`\nGanancia: `{d['ganancia_neta']:.4f} USDT`")
     elif cmd=='/ganancia':
@@ -1277,9 +1303,7 @@ def procesar(chat_id, texto):
         for r in regs: m+=f"`{r['fecha_hora'][:16]}` {r['accion']} — {r['modulo']}\n"
         send(chat_id,m)
 
-
-    elif cmd == '/setsaldo':
-        # /setsaldo CUENTA MONTO
+    elif cmd=='/setsaldo':
         if len(partes) >= 3:
             try:
                 cuenta = partes[1].upper()
@@ -1297,8 +1321,7 @@ def procesar(chat_id, texto):
             cuentas_lista = "\n".join([f"  `{k}`" for k in NOMBRES_CUENTAS.keys()])
             send(chat_id, f"Uso: `/setsaldo CUENTA MONTO`\n\nCuentas disponibles:\n{cuentas_lista}")
 
-    elif cmd == '/saldo_inicial':
-        # /saldo_inicial CUENTA MONTO - sets the baseline without affecting operations
+    elif cmd=='/saldo_inicial':
         if len(partes) >= 3:
             try:
                 cuenta = partes[1].upper()
@@ -1306,7 +1329,6 @@ def procesar(chat_id, texto):
                 if cuenta not in NOMBRES_CUENTAS:
                     send(chat_id, "⚠️ Cuenta no válida. Usa /setsaldo para ver las opciones.")
                 else:
-                    # Store as initial balance
                     set_saldo_inicial(cuenta, monto)
                     nombre = NOMBRES_CUENTAS[cuenta]
                     send(chat_id, f"✅ Saldo inicial registrado\n`{nombre}`: `{monto:,.2f}`\n\n_El sistema recalcula automáticamente desde este punto_")
@@ -1315,13 +1337,14 @@ def procesar(chat_id, texto):
         else:
             send(chat_id, "Uso: `/saldo_inicial CUENTA MONTO`\n\nEjemplo: `/saldo_inicial BS_BANESCO 303581.42`")
 
-    elif cmd == '/saldos_iniciales':
+    elif cmd=='/saldos_iniciales':
         send(chat_id, msg_saldos_iniciales())
 
-    elif cmd == '/version':
-        send(chat_id, "🤖 *GSA Cambios Bot v5.0*\nImportador inteligente Maker/Taker activo")
+    elif cmd=='/version':
+        supa_status = "✅ Conectado" if USE_SUPABASE else "❌ Desactivado"
+        send(chat_id, f"🤖 *GSA Cambios Bot v5.0*\nImportador inteligente Maker/Taker activo\nSupabase: {supa_status}")
 
-    elif cmd == '/testsupabase':
+    elif cmd=='/testsupabase':
         sb_url = os.getenv("SUPABASE_URL", "NO_URL")
         sb_key = os.getenv("SUPABASE_KEY", "NO_KEY")
         send(chat_id, f"🔍 *DEBUG SUPABASE*\n\nURL: `{sb_url[:40]}`\nKEY: `{sb_key[:20]}...`\nUSE_SUPABASE: `{USE_SUPABASE}`")
@@ -1336,9 +1359,9 @@ def procesar(chat_id, texto):
             except Exception as e:
                 send(chat_id, f"❌ Error: `{e}`")
         else:
-            send(chat_id, "❌ USE_SUPABASE es False — variables no configuradas")
+            send(chat_id, "❌ USE_SUPABASE es False — variables no detectadas en Railway")
 
-    elif cmd == '/debuglog':
+    elif cmd=='/debuglog':
         try:
             conn_dl = sqlite3.connect(DB_PATH)
             rows = conn_dl.execute("SELECT ts, msg FROM debug_log ORDER BY id DESC LIMIT 5").fetchall()
@@ -1377,7 +1400,8 @@ def procesar(chat_id, texto):
 /saldos_iniciales
 
 *⚙️ SISTEMA*
-/importar | /sync | /auditoria | /ayuda""")
+/importar | /sync | /auditoria
+/testsupabase | /version | /ayuda""")
 
     elif hay_conv_activa(chat_id):
         send(chat_id, procesar_conv(chat_id, texto))
@@ -1420,115 +1444,64 @@ def loop_csv():
         time.sleep(INTERVALO_CSV_SEG)
 
 # ══════════════════════════════════════════════════════════════════════
-# MAIN
+# PROCESAR DOCUMENTO (archivo enviado por Telegram)
 # ══════════════════════════════════════════════════════════════════════
 def procesar_documento(chat_id: str, file_id: str, nombre: str):
-    """Procesa un documento recibido por Telegram."""
     nombre_lower = nombre.lower()
-
-    # Solo procesar archivos Excel o CSV de Binance
     if not (nombre_lower.endswith('.xlsx') or nombre_lower.endswith('.csv')):
         send(chat_id, f"⚠️ Solo acepto archivos .xlsx o .csv\nRecibí: `{nombre}`")
         return
 
     send(chat_id, f"⏳ Procesando `{nombre}`...\nDetectando sesiones automáticamente...")
-
-    # Descargar el archivo
     contenido = download_file(file_id)
     if not contenido:
         send(chat_id, "❌ No pude descargar el archivo. Intenta de nuevo.")
         return
 
-    # Si es CSV, convertir a xlsx primero
     import tempfile
     if nombre_lower.endswith('.csv'):
         try:
-            import csv, io
+            import csv as _csv, io
             from openpyxl import Workbook
-            # Decode CSV
             texto = contenido.decode('utf-8-sig', errors='replace')
-            reader = csv.reader(io.StringIO(texto))
+            reader = _csv.reader(io.StringIO(texto))
             rows = list(reader)
-            # Create xlsx
             wb_tmp = Workbook()
             ws_tmp = wb_tmp.active
-            # Add header rows to match Binance xlsx format
-            ws_tmp.append([])  # row 1
-            ws_tmp.append([])  # row 2
-            ws_tmp.append(['C2C Order History'])  # row 3
-            ws_tmp.append([])  # row 4
-            ws_tmp.append([])  # row 5
-            ws_tmp.append([])  # row 6
-            ws_tmp.append([])  # row 7
-            ws_tmp.append([])  # row 8
-            ws_tmp.append([])  # row 9
-            # Find header row in CSV
+            for _ in range(9): ws_tmp.append([])
             header_idx = 0
             for i, row in enumerate(rows):
                 if row and 'Order Number' in str(row):
-                    header_idx = i
-                    break
-            # Write header at row 10
+                    header_idx = i; break
             if header_idx < len(rows):
-                # Pad to col 3
-                ws_tmp.append(['', ''] + rows[header_idx])  # row 10 = headers
-                # Write data rows
+                ws_tmp.append(['', ''] + rows[header_idx])
                 for row in rows[header_idx+1:]:
-                    if row:
-                        ws_tmp.append(['', ''] + row)
-            # Save as temp xlsx
+                    if row: ws_tmp.append(['', ''] + row)
             with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
-                wb_tmp.save(tmp.name)
-                ruta_tmp = tmp.name
+                wb_tmp.save(tmp.name); ruta_tmp = tmp.name
         except Exception as e:
-            send(chat_id, f"❌ Error convirtiendo CSV: {e}")
-            return
+            send(chat_id, f"❌ Error convirtiendo CSV: {e}"); return
     else:
         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
-            tmp.write(contenido)
-            ruta_tmp = tmp.name
+            tmp.write(contenido); ruta_tmp = tmp.name
 
     try:
-        # Debug: verify file is readable
         from openpyxl import load_workbook as _lwb
         _wb = _lwb(ruta_tmp, data_only=True)
         _ws = _wb.active
         _filas = _ws.max_row
         send(chat_id, f"📋 Archivo leído: `{_filas}` filas")
-        
-        # Count completed orders
-        _completadas = 0
-        _total = 0
+
+        _completadas = 0; _total = 0
         for _row in _ws.iter_rows(min_row=11, values_only=True):
             if _row[2]:
                 _total += 1
                 _st = str(_row[13]).strip().strip("'") if _row[13] else ''
                 if _st == 'Completed': _completadas += 1
-        send(chat_id, f"📊 Órdenes encontradas: `{_total}` total | `{_completadas}` completadas")
-        
-        # Debug DB_PATH
-        import sqlite3 as _sq
-        send(chat_id, f"🗄️ DB: `{DB_PATH}`")
-        try:
-            _tc = _sq.connect(DB_PATH)
-            _tables = [r[0] for r in _tc.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-            _tc.close()
-            send(chat_id, f"📂 Tablas: `{_tables}`")
-        except Exception as _de:
-            send(chat_id, f"❌ DB Error: `{_de}`")
-
-        # Test _clean_float directly
-        try:
-            test_val = _clean_float("727.5")
-            send(chat_id, f"✅ _clean_float test: `{test_val}`")
-        except Exception as _cfe:
-            send(chat_id, f"❌ _clean_float error: `{_cfe}`")
+        send(chat_id, f"📊 Órdenes: `{_total}` total | `{_completadas}` completadas")
 
         resultado = importar_c2c_inteligente(ruta_tmp, DB_PATH, str(chat_id))
-        send(chat_id, f"🔍 Debug resultado: importadas={resultado.get('importadas_maker',0)} taker={resultado.get('importadas_taker',0)} err={resultado.get('errores',0)} omit={resultado.get('omitidas',0)}")
-        if resultado.get('sesiones'):
-            s = resultado['sesiones'][0]
-            send(chat_id, f"🔍 Primera sesión: compras={s['compras']} ventas={s['ventas']} cpp={s['cpp']:.2f}")
+        send(chat_id, f"🔍 importadas={resultado.get('importadas_maker',0)} taker={resultado.get('importadas_taker',0)} err={resultado.get('errores',0)} omit={resultado.get('omitidas',0)}")
         msg = formatear_resultado_inteligente(resultado)
         send(chat_id, msg)
     except Exception as e:
@@ -1538,11 +1511,16 @@ def procesar_documento(chat_id: str, file_id: str, nombre: str):
         try: os.remove(ruta_tmp)
         except: pass
 
+# ══════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════
 def main():
     global ultimo_offset
     print("="*50)
-    print("   GSA CAMBIOS — BOT INICIANDO")
+    print("   GSA CAMBIOS — BOT INICIANDO v5.0")
     print("="*50)
+    print(f"DB: {DB_PATH}")
+    print(f"Supabase: {'ACTIVADO ✅' if USE_SUPABASE else 'DESACTIVADO ❌'}")
     init_db(); init_saldos()
     if not TELEGRAM_BOT_TOKEN:
         print("❌ TELEGRAM_BOT_TOKEN no configurado"); return
@@ -1551,7 +1529,8 @@ def main():
     threading.Thread(target=loop_spread, daemon=True).start()
     threading.Thread(target=loop_csv, daemon=True).start()
 
-    send(TELEGRAM_CHAT_ID,"✅ *GSA Cambios Bot iniciado*\n\nUsa /ayuda para ver los comandos.")
+    supa_msg = "✅ Supabase conectado" if USE_SUPABASE else "⚠️ Supabase no configurado"
+    send(TELEGRAM_CHAT_ID, f"✅ *GSA Cambios Bot v5.0 iniciado*\n{supa_msg}\n\nUsa /ayuda para ver los comandos.")
     print("\n✅ Bot corriendo...\n")
 
     while True:
@@ -1563,7 +1542,6 @@ def main():
                     msg=update["message"]
                     chat_id=str(msg["chat"]["id"])
                     texto=msg.get("text","")
-                    # Manejar documentos (archivos enviados)
                     if "document" in msg:
                         doc = msg["document"]
                         nombre = doc.get("file_name","archivo")
