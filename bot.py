@@ -1,3 +1,4 @@
+# GSA CAMBIOS BOT v5.0 — IMPORTADOR INTELIGENTE MAKER/TAKER
 """
 GSA CAMBIOS — BOT COMPLETO
 Versión Railway: todo en un solo archivo.
@@ -1290,6 +1291,9 @@ def procesar(chat_id, texto):
 
     elif cmd == '/saldos_iniciales':
         send(chat_id, msg_saldos_iniciales())
+
+    elif cmd == '/version':
+        send(chat_id, "🤖 *GSA Cambios Bot v5.0*\nImportador inteligente Maker/Taker activo")
 
     elif cmd in ('/ayuda','/start','/help'):
         send(chat_id,"""🤖 *GSA CAMBIOS — COMANDOS*
