@@ -1838,7 +1838,7 @@ def procesar(chat_id, texto):
         if len(partes) >= 3:
             try:
                 moneda = partes[1].upper()
-                monto = float(partes[2].replace(',','.').replace('.','',monto.count('.')-1) if partes[2].count('.')>1 else partes[2].replace(',','.'))
+                monto = float(partes[2].replace(',','.'))
                 if moneda not in ('CLP','BS','USDT','BS'):
                     send(chat_id, "Monedas: CLP, BS, USDT"); return
                 send(chat_id, "⏳ Calculando...")
@@ -2132,4 +2132,5 @@ def loop_mercado():
 
             # Alerta BS si spread >= 10 y cambió >= 2 Bs
             if compras_bs and ventas_bs:
- 
+                spread = ventas_bs[0]['precio'] - compras_bs[0]['precio']
+                prec
