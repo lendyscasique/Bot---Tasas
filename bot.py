@@ -1448,7 +1448,22 @@ def procesar_documento(chat_id: str, file_id: str, nombre: str):
                 if _st == 'Completed': _completadas += 1
         send(chat_id, f"📊 Órdenes encontradas: `{_total}` total | `{_completadas}` completadas")
         
+        # Debug DB_PATH
+        import sqlite3 as _sq
+        send(chat_id, f"🗄️ DB: `{DB_PATH}`")
+        try:
+            _tc = _sq.connect(DB_PATH)
+            _tables = [r[0] for r in _tc.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            _tc.close()
+            send(chat_id, f"📂 Tablas: `{_tables}`")
+        except Exception as _de:
+            send(chat_id, f"❌ DB Error: `{_de}`")
+
         resultado = importar_c2c_inteligente(ruta_tmp, DB_PATH, str(chat_id))
+        send(chat_id, f"🔍 Debug resultado: importadas={resultado.get('importadas_maker',0)} taker={resultado.get('importadas_taker',0)} err={resultado.get('errores',0)} omit={resultado.get('omitidas',0)}")
+        if resultado.get('sesiones'):
+            s = resultado['sesiones'][0]
+            send(chat_id, f"🔍 Primera sesión: compras={s['compras']} ventas={s['ventas']} cpp={s['cpp']:.2f}")
         msg = formatear_resultado_inteligente(resultado)
         send(chat_id, msg)
     except Exception as e:
