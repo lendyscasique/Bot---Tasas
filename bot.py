@@ -1321,6 +1321,23 @@ def procesar(chat_id, texto):
     elif cmd == '/version':
         send(chat_id, "🤖 *GSA Cambios Bot v5.0*\nImportador inteligente Maker/Taker activo")
 
+    elif cmd == '/testsupabase':
+        sb_url = os.getenv("SUPABASE_URL", "NO_URL")
+        sb_key = os.getenv("SUPABASE_KEY", "NO_KEY")
+        send(chat_id, f"🔍 *DEBUG SUPABASE*\n\nURL: `{sb_url[:40]}`\nKEY: `{sb_key[:20]}...`\nUSE_SUPABASE: `{USE_SUPABASE}`")
+        if USE_SUPABASE:
+            try:
+                r = requests.get(
+                    f"{SUPABASE_URL}/rest/v1/tasas?select=count",
+                    headers={"apikey": SUPABASE_KEY,
+                             "Authorization": f"Bearer {SUPABASE_KEY}"},
+                    timeout=10)
+                send(chat_id, f"✅ Supabase responde: `{r.status_code}` — `{r.text[:100]}`")
+            except Exception as e:
+                send(chat_id, f"❌ Error: `{e}`")
+        else:
+            send(chat_id, "❌ USE_SUPABASE es False — variables no configuradas")
+
     elif cmd == '/debuglog':
         try:
             conn_dl = sqlite3.connect(DB_PATH)
