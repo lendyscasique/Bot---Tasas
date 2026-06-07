@@ -549,18 +549,16 @@ PAUSA_SESION_MIN = 45
 PAUSA_SESION_MIN = 45  # gap > 45 min entre órdenes = nueva sesión
 
 def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
-    try:
-        from openpyxl import load_workbook
-        wb = load_workbook(ruta_archivo, data_only=True)
-        ws = wb.active
-    except Exception as e:
-        return {'error': str(e)}
+    """Importador inteligente Binance C2C con detección Maker/Taker y sesiones."""
+    import sqlite3 as _sq3
+    from datetime import datetime as _dt
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-
-    c.execute("""CREATE TABLE IF NOT EXISTS binance_sesiones (
+    # Step 1: Init DB connection
+    _conn = _sq3.connect(db_path)
+    _conn.execute("""CREATE TABLE IF NOT EXISTS debug_log
+        (id INTEGER PRIMARY KEY AUTOINCREMENT,
+         ts DATETIME DEFAULT CURRENT_TIMESTAMP, msg TEXT)""")
+    _conn.execute("""CREATE TABLE IF NOT EXISTS binance_sesiones (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         sesion TEXT, fecha DATE, hora_inicio TEXT, hora_fin TEXT,
         compras INTEGER DEFAULT 0, ventas INTEGER DEFAULT 0,
@@ -571,259 +569,222 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
         usdt_pendiente REAL DEFAULT 0, fees_usdt REAL DEFAULT 0,
         estado TEXT DEFAULT 'Cerrado',
         fecha_registro DATETIME DEFAULT CURRENT_TIMESTAMP)""")
-    conn.commit()
+    _conn.commit()
 
-    # ── Auto-detect header row ──────────────────────────────────────
-    header_row = 11  # default
-    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
-        for v in row:
-            if v and 'Order Number' in str(v):
-                header_row = i + 1  # data starts next row
-                break
-        if header_row != 11: break
+    def _log(msg):
+        _conn.execute("INSERT INTO debug_log (msg) VALUES (?)", (msg,))
+        _conn.commit()
 
-    # ── Parse all completed orders ────────────────────────────────────
-    def _clean_float(v):
+    def _f(v):
         if v is None: return 0.0
         s = str(v).strip().strip("'")
         try: return float(s.replace(',','')) if s else 0.0
         except: return 0.0
 
-    ordenes = []
-    for row in ws.iter_rows(min_row=header_row, values_only=True):
-        if not row[2]: continue
-        status = str(row[13]).strip().strip("'") if row[13] else ''
-        if status != 'Completed': continue
+    # Step 2: Open file
+    try:
+        from openpyxl import load_workbook as _lw
+        _wb = _lw(ruta_archivo, data_only=True)
+        _ws = _wb.active
+        _log(f"file_opened: rows={_ws.max_row}")
+    except Exception as e:
+        _log(f"file_error: {e}")
+        _conn.close()
+        return {'error': str(e), 'importadas_maker':0,'importadas_taker':0,
+                'importadas_clp':0,'omitidas':0,'errores':0,'sesiones':[],
+                'total_ganancia_bs':0,'total_ganancia_u':0,'usdt_pendiente':0,'fees_total':0}
 
-        created = str(row[14]).strip().strip("'") if row[14] else ''
+    # Step 3: Find header
+    _header = 11
+    for _i, _row in enumerate(_ws.iter_rows(values_only=True), 1):
+        for _v in _row:
+            if _v and 'Order Number' in str(_v):
+                _header = _i + 1; break
+        if _header != 11: break
+    _log(f"header_row: {_header}")
+
+    # Step 4: Parse orders
+    _ordenes = []
+    _skip_status = 0; _skip_date = 0; _skip_nonum = 0
+    for _row in _ws.iter_rows(min_row=_header, values_only=True):
+        if not _row[2]: _skip_nonum+=1; continue
+        _st = str(_row[13]).strip().strip("'") if _row[13] else ''
+        if _st != 'Completed': _skip_status+=1; continue
+        _cr = str(_row[14]).strip().strip("'") if _row[14] else ''
         try:
-            fs = '20'+created if created.startswith('26-') else created
-            dt = datetime.strptime(fs[:16], '%Y-%m-%d %H:%M')
-        except: continue
-
-        taker_fee = _clean_float(row[11])
-        maker_fee = _clean_float(row[10])
-
-        ordenes.append({
-            'num':       str(row[2]).strip().strip("'"),
-            'tipo':      str(row[3]).strip().strip("'"),
-            'fiat':      str(row[5]).strip().strip("'"),
-            'total':     _clean_float(row[6]),
-            'precio':    _clean_float(row[7]),
-            'cantidad':  _clean_float(row[8]),
-            'maker_fee': maker_fee,
-            'taker_fee': taker_fee,
-            'contra':    str(row[12]).strip().strip("'") if row[12] else '',
-            'dt':        dt,
-            'is_taker':  taker_fee > 0,
-            'is_maker':  taker_fee == 0,
+            _fs = '20'+_cr if _cr.startswith('26-') else _cr
+            _dt2 = _dt.strptime(_fs[:16], '%Y-%m-%d %H:%M')
+        except: _skip_date+=1; continue
+        _tf = _f(_row[11]); _mf = _f(_row[10])
+        _ordenes.append({
+            'num':  str(_row[2]).strip().strip("'"),
+            'tipo': str(_row[3]).strip().strip("'"),
+            'fiat': str(_row[5]).strip().strip("'"),
+            'total':_f(_row[6]),'precio':_f(_row[7]),'cantidad':_f(_row[8]),
+            'maker_fee':_mf,'taker_fee':_tf,'contra':str(_row[12]).strip().strip("'") if _row[12] else '',
+            'dt':_dt2,'is_taker':_tf>0,'is_maker':_tf==0,
         })
+    _log(f"parsed: total={len(_ordenes)} skip_st={_skip_status} skip_dt={_skip_date} skip_nn={_skip_nonum}")
 
-    # ── Separate Maker vs Taker ───────────────────────────────────────
-    maker_ves = [o for o in ordenes if o['fiat']=='VES' and o['is_maker']]
-    taker_ops = [o for o in ordenes if o['is_taker']]
-    clp_ops   = [o for o in ordenes if o['fiat']=='CLP' and not o['is_taker']]
+    # Step 5: Separate
+    _maker = [o for o in _ordenes if o['fiat']=='VES' and o['is_maker']]
+    _taker = [o for o in _ordenes if o['is_taker']]
+    _clp   = [o for o in _ordenes if o['fiat']=='CLP' and not o['is_taker']]
+    _log(f"separated: maker_ves={len(_maker)} taker={len(_taker)} clp={len(_clp)}")
 
-    # Debug: log counts to SQLite for retrieval
-    conn_debug = sqlite3.connect(db_path)
-    conn_debug.execute("""CREATE TABLE IF NOT EXISTS debug_log
-        (id INTEGER PRIMARY KEY AUTOINCREMENT, ts DATETIME DEFAULT CURRENT_TIMESTAMP,
-         msg TEXT)""")
-    conn_debug.execute("INSERT INTO debug_log (msg) VALUES (?)",
-        (f"ordenes={len(ordenes)} maker_ves={len(maker_ves)} taker={len(taker_ops)} clp={len(clp_ops)}",))
-    if ordenes:
-        o = ordenes[0]
-        conn_debug.execute("INSERT INTO debug_log (msg) VALUES (?)",
-            (f"first_order: num={o['num']} tipo={o['tipo']} fiat={o['fiat']} is_maker={o['is_maker']} is_taker={o['is_taker']} maker_fee={o['maker_fee']} taker_fee={o['taker_fee']}",))
-    conn_debug.commit()
-    conn_debug.close()
+    # Step 6: Detect sessions
+    _sesiones_raw = []
+    if _maker:
+        _sa = [_maker[0]]
+        for _o in _maker[1:]:
+            _gap = (_o['dt']-_sa[-1]['dt']).total_seconds()/60
+            if _gap > PAUSA_SESION_MIN: _sesiones_raw.append(_sa); _sa=[_o]
+            else: _sa.append(_o)
+        if _sa: _sesiones_raw.append(_sa)
+    _log(f"sessions: {len(_sesiones_raw)}")
 
-    # ── Detect sessions ───────────────────────────────────────────────
-    sesiones_raw = []
-    if maker_ves:
-        sesion_actual = [maker_ves[0]]
-        for orden in maker_ves[1:]:
-            gap = (orden['dt'] - sesion_actual[-1]['dt']).total_seconds()/60
-            if gap > PAUSA_SESION_MIN:
-                sesiones_raw.append(sesion_actual)
-                sesion_actual = [orden]
-            else:
-                sesion_actual.append(orden)
-        if sesion_actual:
-            sesiones_raw.append(sesion_actual)
+    # Step 7: Save sessions and orders
+    _imp=0; _omit=0; _err=0; _ses_saved=[]
+    for _ns, _ords in enumerate(_sesiones_raw, 1):
+        _comp = [o for o in _ords if o['tipo']=='Buy']
+        _vent = [o for o in _ords if o['tipo']=='Sell']
+        _bsp  = sum(o['total']    for o in _comp)
+        _uc   = sum(o['cantidad'] for o in _comp)
+        _bsr  = sum(o['total']    for o in _vent)
+        _uv   = sum(o['cantidad'] for o in _vent)
+        _fees = sum(o['maker_fee']+o['taker_fee'] for o in _ords)
+        _cpp  = _bsp/_uc if _uc else 0
+        _pv   = _bsr/_uv if _uv else 0
+        _gb   = _bsr-(_uv*_cpp) if _uv and _cpp else 0
+        _gu   = _gb/_cpp if _cpp else 0
+        _pend = _uc-_uv
+        _fd   = _ords[0]['dt'].strftime('%Y-%m-%d')
+        _hi   = _ords[0]['dt'].strftime('%H:%M')
+        _hf   = _ords[-1]['dt'].strftime('%H:%M')
+        _sl   = f"S{_ns}"
+        _est  = 'Abierto' if _pend>0.01 else 'Cerrado'
 
-    # ── Process sessions ──────────────────────────────────────────────
-    importadas = 0; omitidas = 0; errores = 0
-    sesiones_guardadas = []
-
-    for num_ses, ordenes_ses in enumerate(sesiones_raw, 1):
-        compras = [o for o in ordenes_ses if o['tipo']=='Buy']
-        ventas  = [o for o in ordenes_ses if o['tipo']=='Sell']
-
-        bs_pagado   = sum(o['total']    for o in compras)
-        usdt_comp   = sum(o['cantidad'] for o in compras)
-        bs_recibido = sum(o['total']    for o in ventas)
-        usdt_vend   = sum(o['cantidad'] for o in ventas)
-        fees        = sum(o['maker_fee']+o['taker_fee'] for o in ordenes_ses)
-
-        cpp   = bs_pagado/usdt_comp   if usdt_comp   else 0
-        pv    = bs_recibido/usdt_vend if usdt_vend   else 0
-        gan_bs= bs_recibido-(usdt_vend*cpp) if usdt_vend and cpp else 0
-        gan_u = gan_bs/cpp if cpp else 0
-        pend  = usdt_comp - usdt_vend
-
-        fecha_ses = ordenes_ses[0]['dt'].strftime('%Y-%m-%d')
-        hora_ini  = ordenes_ses[0]['dt'].strftime('%H:%M')
-        hora_fin  = ordenes_ses[-1]['dt'].strftime('%H:%M')
-        ses_label = f"S{num_ses}"
-        estado    = 'Abierto' if pend > 0.01 else 'Cerrado'
-
-        existe = c.execute(
+        _ex = _conn.execute(
             "SELECT id FROM binance_sesiones WHERE sesion=? AND fecha=?",
-            (ses_label, fecha_ses)).fetchone()
-
-        if existe:
-            c.execute("""UPDATE binance_sesiones SET
+            (_sl,_fd)).fetchone()
+        if _ex:
+            _conn.execute("""UPDATE binance_sesiones SET
                 compras=?,ventas=?,usdt_comprado=?,bs_pagado=?,
                 usdt_vendido=?,bs_recibido=?,cpp_bs=?,precio_venta_bs=?,
                 ganancia_bs=?,ganancia_usdt=?,usdt_pendiente=?,
-                fees_usdt=?,estado=?,hora_fin=?
-                WHERE sesion=? AND fecha=?""",
-                (len(compras),len(ventas),round(usdt_comp,4),round(bs_pagado,2),
-                 round(usdt_vend,4),round(bs_recibido,2),round(cpp,4),round(pv,4),
-                 round(gan_bs,2),round(gan_u,4),round(pend,4),
-                 round(fees,4),estado,hora_fin,ses_label,fecha_ses))
+                fees_usdt=?,estado=?,hora_fin=? WHERE sesion=? AND fecha=?""",
+                (len(_comp),len(_vent),round(_uc,4),round(_bsp,2),
+                 round(_uv,4),round(_bsr,2),round(_cpp,4),round(_pv,4),
+                 round(_gb,2),round(_gu,4),round(_pend,4),round(_fees,4),
+                 _est,_hf,_sl,_fd))
         else:
-            c.execute("""INSERT INTO binance_sesiones
+            _conn.execute("""INSERT INTO binance_sesiones
                 (sesion,fecha,hora_inicio,hora_fin,compras,ventas,
                  usdt_comprado,bs_pagado,usdt_vendido,bs_recibido,
                  cpp_bs,precio_venta_bs,ganancia_bs,ganancia_usdt,
                  usdt_pendiente,fees_usdt,estado)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (ses_label,fecha_ses,hora_ini,hora_fin,
-                 len(compras),len(ventas),round(usdt_comp,4),round(bs_pagado,2),
-                 round(usdt_vend,4),round(bs_recibido,2),round(cpp,4),round(pv,4),
-                 round(gan_bs,2),round(gan_u,4),round(pend,4),round(fees,4),estado))
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (_sl,_fd,_hi,_hf,len(_comp),len(_vent),round(_uc,4),round(_bsp,2),
+                 round(_uv,4),round(_bsr,2),round(_cpp,4),round(_pv,4),
+                 round(_gb,2),round(_gu,4),round(_pend,4),round(_fees,4),_est))
+        _conn.commit()
 
-        sesiones_guardadas.append({
-            'sesion':ses_label,'fecha':fecha_ses,
-            'hora_ini':hora_ini,'hora_fin':hora_fin,
-            'compras':len(compras),'ventas':len(ventas),
-            'usdt_comp':usdt_comp,'bs_pagado':bs_pagado,
-            'usdt_vend':usdt_vend,'bs_recibido':bs_recibido,
-            'cpp':cpp,'pv':pv,'gan_bs':gan_bs,'gan_u':gan_u,
-            'pend':pend,'fees':fees,'estado':estado,
-        })
-
-        # Register individual orders
-        for orden in ordenes_ses:
-            existe_op = c.execute(
+        for _o in _ords:
+            _ex2 = _conn.execute(
                 "SELECT id FROM operaciones WHERE observaciones LIKE ?",
-                (f'%{orden["num"]}%',)).fetchone()
-            if existe_op: omitidas+=1; continue
-            if orden['tipo']=='Buy':
-                tipo_op='BS→USDT';mon_ent='BS';mto_ent=orden['total']
-                mon_sal='USDT';mto_sal=orden['cantidad']-orden['maker_fee']
+                (f'%{_o["num"]}%',)).fetchone()
+            if _ex2: _omit+=1; continue
+            if _o['tipo']=='Buy':
+                _top='BS→USDT';_me='BS';_ment=_o['total'];_ms='USDT';_msal=_o['cantidad']-_o['maker_fee']
             else:
-                tipo_op='USDT→BS';mon_ent='USDT';mto_ent=orden['cantidad']
-                mon_sal='BS';mto_sal=orden['total']
+                _top='USDT→BS';_me='USDT';_ment=_o['cantidad'];_ms='BS';_msal=_o['total']
             try:
-                c.execute("""INSERT INTO operaciones
+                _conn.execute("""INSERT INTO operaciones
                     (fecha,hora,cliente,tipo_op,mon_entrada,monto_entrada,
                      mon_salida,monto_salida,tasa_cliente,tasa_referencia,
                      usdt_equiv,diferencial,metodo,estado,observaciones,usuario_telegram)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (orden['dt'].strftime('%Y-%m-%d'),orden['dt'].strftime('%H:%M'),
-                     f'Binance Maker ({orden["contra"]})',tipo_op,
-                     mon_ent,mto_ent,mon_sal,mto_sal,orden['precio'],orden['precio'],
-                     orden['cantidad'],0,f'Binance Maker — {ses_label}','Completada',
-                     f'Orden #{orden["num"]} | {ses_label} | Fee:{orden["maker_fee"]:.4f}',
-                     usuario))
-                importadas+=1
-            except: errores+=1
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (_o['dt'].strftime('%Y-%m-%d'),_o['dt'].strftime('%H:%M'),
+                     f'Binance Maker ({_o["contra"]})',_top,_me,_ment,_ms,_msal,
+                     _o['precio'],_o['precio'],_o['cantidad'],0,
+                     f'Binance Maker — {_sl}','Completada',
+                     f'Orden #{_o["num"]} | {_sl}',usuario))
+                _imp+=1
+            except Exception as _ie: _err+=1; _log(f"insert_err: {_ie}")
+        _conn.commit()
 
-    # ── Process Taker ─────────────────────────────────────────────────
-    taker_imp = 0
-    for orden in taker_ops:
-        existe = c.execute("SELECT id FROM operaciones WHERE observaciones LIKE ?",
-                           (f'%{orden["num"]}%',)).fetchone()
-        if existe: omitidas+=1; continue
-        fiat = orden['fiat']
-        if fiat=='VES':
-            if orden['tipo']=='Buy':
-                tipo_op='BS→USDT';mon_ent='BS';mto_ent=orden['total']
-                mon_sal='USDT';mto_sal=orden['cantidad']-orden['taker_fee']
-            else:
-                tipo_op='USDT→BS';mon_ent='USDT';mto_ent=orden['cantidad']
-                mon_sal='BS';mto_sal=orden['total']
-        elif fiat=='CLP':
-            if orden['tipo']=='Buy':
-                tipo_op='CLP→USDT';mon_ent='CLP';mto_ent=orden['total']
-                mon_sal='USDT';mto_sal=orden['cantidad']-orden['taker_fee']
-            else:
-                tipo_op='USDT→CLP';mon_ent='USDT';mto_ent=orden['cantidad']
-                mon_sal='CLP';mto_sal=orden['total']
+        _ses_saved.append({
+            'sesion':_sl,'fecha':_fd,'hora_ini':_hi,'hora_fin':_hf,
+            'compras':len(_comp),'ventas':len(_vent),
+            'usdt_comp':_uc,'bs_pagado':_bsp,'usdt_vend':_uv,
+            'bs_recibido':_bsr,'cpp':_cpp,'pv':_pv,
+            'gan_bs':_gb,'gan_u':_gu,'pend':_pend,'fees':_fees,'estado':_est,
+        })
+
+    _log(f"done: imp={_imp} omit={_omit} err={_err} sessions={len(_ses_saved)}")
+
+    # Process Taker
+    _timp=0
+    for _o in _taker:
+        _ex = _conn.execute("SELECT id FROM operaciones WHERE observaciones LIKE ?",
+                            (f'%{_o["num"]}%',)).fetchone()
+        if _ex: _omit+=1; continue
+        _fiat=_o['fiat']
+        if _fiat=='VES':
+            if _o['tipo']=='Buy': _top='BS→USDT';_me='BS';_ment=_o['total'];_ms='USDT';_msal=_o['cantidad']-_o['taker_fee']
+            else: _top='USDT→BS';_me='USDT';_ment=_o['cantidad'];_ms='BS';_msal=_o['total']
+        elif _fiat=='CLP':
+            if _o['tipo']=='Buy': _top='CLP→USDT';_me='CLP';_ment=_o['total'];_ms='USDT';_msal=_o['cantidad']-_o['taker_fee']
+            else: _top='USDT→CLP';_me='USDT';_ment=_o['cantidad'];_ms='CLP';_msal=_o['total']
         else: continue
         try:
-            c.execute("""INSERT INTO operaciones
+            _conn.execute("""INSERT INTO operaciones
                 (fecha,hora,cliente,tipo_op,mon_entrada,monto_entrada,
                  mon_salida,monto_salida,tasa_cliente,tasa_referencia,
                  usdt_equiv,diferencial,metodo,estado,observaciones,usuario_telegram)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (orden['dt'].strftime('%Y-%m-%d'),orden['dt'].strftime('%H:%M'),
-                 f'Binance Taker ({orden["contra"]})',tipo_op,
-                 mon_ent,mto_ent,mon_sal,mto_sal,orden['precio'],orden['precio'],
-                 orden['cantidad'],0,'Binance P2P Taker','Completada',
-                 f'Orden #{orden["num"]} | Taker | Fee:{orden["taker_fee"]:.4f}',
-                 usuario))
-            taker_imp+=1
-        except: errores+=1
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (_o['dt'].strftime('%Y-%m-%d'),_o['dt'].strftime('%H:%M'),
+                 f'Binance Taker ({_o["contra"]})',_top,_me,_ment,_ms,_msal,
+                 _o['precio'],_o['precio'],_o['cantidad'],0,
+                 'Binance P2P Taker','Completada',
+                 f'Orden #{_o["num"]} | Taker',usuario))
+            _timp+=1
+        except: pass
 
-    # ── Process CLP ───────────────────────────────────────────────────
-    clp_imp = 0
-    for orden in clp_ops:
-        existe = c.execute("SELECT id FROM operaciones WHERE observaciones LIKE ?",
-                           (f'%{orden["num"]}%',)).fetchone()
-        if existe: continue
-        if orden['tipo']=='Buy':
-            tipo_op='CLP→USDT';mon_ent='CLP';mto_ent=orden['total']
-            mon_sal='USDT';mto_sal=orden['cantidad']-orden['maker_fee']
-        else:
-            tipo_op='USDT→CLP';mon_ent='USDT';mto_ent=orden['cantidad']
-            mon_sal='CLP';mto_sal=orden['total']
+    # Process CLP
+    _cimp=0
+    for _o in _clp:
+        _ex = _conn.execute("SELECT id FROM operaciones WHERE observaciones LIKE ?",
+                            (f'%{_o["num"]}%',)).fetchone()
+        if _ex: continue
+        if _o['tipo']=='Buy': _top='CLP→USDT';_me='CLP';_ment=_o['total'];_ms='USDT';_msal=_o['cantidad']-_o['maker_fee']
+        else: _top='USDT→CLP';_me='USDT';_ment=_o['cantidad'];_ms='CLP';_msal=_o['total']
         try:
-            c.execute("""INSERT INTO operaciones
+            _conn.execute("""INSERT INTO operaciones
                 (fecha,hora,cliente,tipo_op,mon_entrada,monto_entrada,
                  mon_salida,monto_salida,tasa_cliente,tasa_referencia,
                  usdt_equiv,diferencial,metodo,estado,observaciones,usuario_telegram)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (orden['dt'].strftime('%Y-%m-%d'),orden['dt'].strftime('%H:%M'),
-                 f'Binance CLP ({orden["contra"]})',tipo_op,
-                 mon_ent,mto_ent,mon_sal,mto_sal,orden['precio'],orden['precio'],
-                 orden['cantidad'],0,'Binance P2P CLP','Completada',
-                 f'Orden #{orden["num"]} | CLP | Fee:{orden["maker_fee"]+orden["taker_fee"]:.4f}',
-                 usuario))
-            clp_imp+=1
-        except: errores+=1
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (_o['dt'].strftime('%Y-%m-%d'),_o['dt'].strftime('%H:%M'),
+                 f'Binance CLP ({_o["contra"]})',_top,_me,_ment,_ms,_msal,
+                 _o['precio'],_o['precio'],_o['cantidad'],0,
+                 'Binance P2P CLP','Completada',
+                 f'Orden #{_o["num"]} | CLP',usuario))
+            _cimp+=1
+        except: pass
 
-    conn.commit(); conn.close()
+    _conn.commit(); _conn.close()
 
-    total_gan_bs = sum(s['gan_bs'] for s in sesiones_guardadas)
-    total_gan_u  = sum(s['gan_u']  for s in sesiones_guardadas)
-    total_pend   = sum(s['pend']   for s in sesiones_guardadas if s['estado']=='Abierto')
-    total_fees   = sum(s['fees']   for s in sesiones_guardadas)
+    _tgb=sum(s['gan_bs'] for s in _ses_saved)
+    _tgu=sum(s['gan_u'] for s in _ses_saved)
+    _tpend=sum(s['pend'] for s in _ses_saved if s['estado']=='Abierto')
+    _tfees=sum(s['fees'] for s in _ses_saved)
 
     return {
-        'sesiones': sesiones_guardadas,
-        'importadas_maker': importadas,
-        'importadas_taker': taker_imp,
-        'importadas_clp':   clp_imp,
-        'omitidas':         omitidas,
-        'errores':          errores,
-        'total_ganancia_bs': round(total_gan_bs,2),
-        'total_ganancia_u':  round(total_gan_u,4),
-        'usdt_pendiente':    round(total_pend,4),
-        'fees_total':        round(total_fees,4),
+        'sesiones':_ses_saved,'importadas_maker':_imp,'importadas_taker':_timp,
+        'importadas_clp':_cimp,'omitidas':_omit,'errores':_err,
+        'total_ganancia_bs':round(_tgb,2),'total_ganancia_u':round(_tgu,4),
+        'usdt_pendiente':round(_tpend,4),'fees_total':round(_tfees,4),
     }
 
 
