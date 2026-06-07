@@ -480,14 +480,14 @@ def analizar_patron_bs():
 
     resumen = {}
     for hora, datos in sorted(por_hora.items()):
-    	ventas = [d['venta'] for d in datos]
-    	spreads = [d['spread'] for d in datos]
-    	resumen[hora] = {
-    		'venta_prom': round(sum(ventas)/len(ventas), 2),
-    		'spread_prom': round(sum(spreads)/len(spreads), 2),
-    		'venta_max': max(ventas),
-    		'venta_min': min(ventas),
-    	}
+        ventas = [d['venta'] for d in datos]
+        spreads = [d['spread'] for d in datos]
+        resumen[hora] = {
+            'venta_prom': round(sum(ventas)/len(ventas), 2),
+            'spread_prom': round(sum(spreads)/len(spreads), 2),
+            'venta_max': max(ventas),
+            'venta_min': min(ventas),
+        }
 
     # Mejor y peor hora
     mejor_hora = max(resumen.items(), key=lambda x: x[1]['spread_prom'])
@@ -2132,4 +2132,4 @@ def loop_mercado():
 
             # Alerta BS si spread >= 10 y cambió >= 2 Bs
             if compras_bs and ventas_bs:
-                spread = ventas_bs[0]
+ 
