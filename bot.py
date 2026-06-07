@@ -583,17 +583,17 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
         if header_row != 11: break
 
     # ── Parse all completed orders ────────────────────────────────────
+    def _clean_float(v):
+        if v is None: return 0.0
+        s = str(v).strip().strip("'")
+        try: return float(s.replace(',','')) if s else 0.0
+        except: return 0.0
+
     ordenes = []
     for row in ws.iter_rows(min_row=header_row, values_only=True):
         if not row[2]: continue
         status = str(row[13]).strip().strip("'") if row[13] else ''
         if status != 'Completed': continue
-
-        def _f(v):
-            if v is None: return 0.0
-            s = str(v).strip().strip("'")
-            try: return float(s.replace(',','')) if s else 0.0
-            except: return 0.0
 
         created = str(row[14]).strip().strip("'") if row[14] else ''
         try:
@@ -601,16 +601,16 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
             dt = datetime.strptime(fs[:16], '%Y-%m-%d %H:%M')
         except: continue
 
-        taker_fee = _f(row[11])
-        maker_fee = _f(row[10])
+        taker_fee = _clean_float(row[11])
+        maker_fee = _clean_float(row[10])
 
         ordenes.append({
             'num':       str(row[2]).strip().strip("'"),
             'tipo':      str(row[3]).strip().strip("'"),
             'fiat':      str(row[5]).strip().strip("'"),
-            'total':     _f(row[6]),
-            'precio':    _f(row[7]),
-            'cantidad':  _f(row[8]),
+            'total':     _clean_float(row[6]),
+            'precio':    _clean_float(row[7]),
+            'cantidad':  _clean_float(row[8]),
             'maker_fee': maker_fee,
             'taker_fee': taker_fee,
             'contra':    str(row[12]).strip().strip("'") if row[12] else '',
