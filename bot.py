@@ -171,6 +171,10 @@ def get_ultima_tasa():
     return dict(row) if row else {}
 
 def guardar_tasa(datos):
+    # Save to Supabase if available
+    if USE_SUPABASE:
+        supa_insert('tasas', {k: v for k, v in datos.items() 
+                              if k != 'mejor_banco' and v is not None})
     conn = get_conn(); c = conn.cursor()
     c.execute("""INSERT INTO tasas (
         bcv_usd,bcv_eur,ban_bs_compra,ban_bs_venta,ban_bs_spread,
@@ -190,6 +194,13 @@ def guardar_tasa(datos):
     conn.commit(); conn.close()
 
 def guardar_operacion(datos):
+    # Save to Supabase if available
+    if USE_SUPABASE:
+        supa_data = {k: str(v) if isinstance(v, (dict,list)) else v 
+                     for k, v in datos.items() 
+                     if k not in ('_tasa_sug','_mto_sal_sug','estado') and v is not None}
+        supa_data['estado'] = datos.get('estado', 'Completada')
+        supa_insert('operaciones', supa_data)
     conn = get_conn(); c = conn.cursor()
     datos['diferencial'] = (datos.get('tasa_cliente',0) or 0) - (datos.get('tasa_referencia',0) or 0)
     if not datos.get('usdt_equiv'):
@@ -371,6 +382,10 @@ def get_operaciones_hoy():
     return [dict(r) for r in rows]
 
 def get_auditoria(limite=10):
+    # Try Supabase first
+    if USE_SUPABASE:
+        rows = supa_select('auditoria', f'order=fecha_hora.desc&limit={limite}')
+        if rows: return rows
     conn = get_conn()
     rows = conn.execute("SELECT * FROM auditoria ORDER BY fecha_hora DESC LIMIT ?",(limite,)).fetchall()
     conn.close()
@@ -689,6 +704,27 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
                  round(_gb,2),round(_gu,4),round(_pend,4),round(_fees,4),_est))
         _conn.commit()
 
+        # Also save session to Supabase
+        if USE_SUPABASE:
+            ses_data = {
+                'sesion': _sl, 'fecha': _fd,
+                'hora_inicio': _hi, 'hora_fin': _hf,
+                'compras': len(_comp), 'ventas': len(_vent),
+                'usdt_comprado': round(_uc,4), 'bs_pagado': round(_bsp,2),
+                'usdt_vendido': round(_uv,4), 'bs_recibido': round(_bsr,2),
+                'cpp_bs': round(_cpp,4), 'precio_venta_bs': round(_pv,4),
+                'ganancia_bs': round(_gb,2), 'ganancia_usdt': round(_gu,4),
+                'usdt_pendiente': round(_pend,4), 'fees_usdt': round(_fees,4),
+                'estado': _est
+            }
+            # Check if exists
+            existing = supa_select('binance_sesiones', 
+                                   f'sesion=eq.{_sl}&fecha=eq.{_fd}')
+            if existing:
+                supa_update('binance_sesiones', 'sesion', _sl, ses_data)
+            else:
+                supa_insert('binance_sesiones', ses_data)
+
         for _o in _ords:
             _ex2 = _conn.execute(
                 "SELECT id FROM operaciones WHERE observaciones LIKE ?",
@@ -710,6 +746,21 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
                      f'Binance Maker — {_sl}','Completada',
                      f'Orden #{_o["num"]} | {_sl}',usuario))
                 _imp+=1
+                # Save to Supabase
+                if USE_SUPABASE:
+                    supa_insert('operaciones', {
+                        'fecha': _o['dt'].strftime('%Y-%m-%d'),
+                        'hora': _o['dt'].strftime('%H:%M'),
+                        'cliente': f'Binance Maker ({_o["contra"]})',
+                        'tipo_op': _top, 'mon_entrada': _me,
+                        'monto_entrada': _ment, 'mon_salida': _ms,
+                        'monto_salida': _msal, 'tasa_cliente': _o['precio'],
+                        'tasa_referencia': _o['precio'], 'usdt_equiv': _o['cantidad'],
+                        'diferencial': 0, 'metodo': f'Binance Maker — {_sl}',
+                        'estado': 'Completada',
+                        'observaciones': f'Orden #{_o["num"]} | {_sl}',
+                        'usuario_telegram': usuario
+                    })
             except Exception as _ie: _err+=1; _log(f"insert_err: {_ie}")
         _conn.commit()
 
