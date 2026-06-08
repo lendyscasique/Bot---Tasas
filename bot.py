@@ -2158,7 +2158,7 @@ def procesar(chat_id, texto):
 
     elif cmd=='/western':
         if len(partes)>=2:
-        try:
+           try:
                 western_rate=float(partes[1].replace(',','.'))
                 set_config('western_actualizado_hoy', str(today_local()))
                 send(chat_id,f"✅ Western: `{western_rate}` — Recordatorio cancelado para hoy.")
