@@ -223,6 +223,14 @@ def init_db():
         disp_venta_1 REAL, disp_venta_2 REAL,
         disp_compra_1 REAL, disp_compra_2 REAL,
         fecha_registro DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+    # TABLA NUEVA: oportunidades_perdidas
+    c.execute("""CREATE TABLE IF NOT EXISTS oportunidades_perdidas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha DATE, hora TIME, tipo TEXT,
+        descripcion TEXT, monto_requerido REAL, moneda_requerida TEXT,
+        ganancia_estimada_perdida REAL, razon TEXT,
+        capital_disponible_usdt REAL, observaciones TEXT,
+        fecha_registro DATETIME DEFAULT CURRENT_TIMESTAMP)""")
     # TABLA NUEVA: umbrales_liquidez
     c.execute("""CREATE TABLE IF NOT EXISTS umbrales_liquidez (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -901,6 +909,85 @@ def generar_reporte_semanal():
 # ══════════════════════════════════════════════════════════════════════
 # RESUMEN DE CORRESPONSALES Y CLIENTES
 # ══════════════════════════════════════════════════════════════════════
+
+def registrar_oportunidad_perdida(tipo, descripcion, monto_requerido, moneda, ganancia_estimada, razon, observaciones=""):
+    """Registra una oportunidad de ganancia que no se pudo aprovechar por falta de capital."""
+    analisis = analizar_capital()
+    ahora = now_local()
+    datos = {
+        'fecha': str(ahora.date()),
+        'hora': ahora.strftime("%H:%M"),
+        'tipo': tipo,
+        'descripcion': descripcion,
+        'monto_requerido': monto_requerido,
+        'moneda_requerida': moneda,
+        'ganancia_estimada_perdida': ganancia_estimada,
+        'razon': razon,
+        'capital_disponible_usdt': analisis['patrimonio_usdt'],
+        'observaciones': observaciones,
+    }
+    conn = get_conn()
+    conn.execute("""INSERT INTO oportunidades_perdidas
+        (fecha,hora,tipo,descripcion,monto_requerido,moneda_requerida,
+         ganancia_estimada_perdida,razon,capital_disponible_usdt,observaciones)
+        VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (datos['fecha'],datos['hora'],datos['tipo'],datos['descripcion'],
+         datos['monto_requerido'],datos['moneda_requerida'],
+         datos['ganancia_estimada_perdida'],datos['razon'],
+         datos['capital_disponible_usdt'],datos['observaciones']))
+    conn.commit(); conn.close()
+    if USE_SUPABASE:
+        supa_insert('oportunidades_perdidas', datos)
+
+def msg_oportunidades(dias=7):
+    """Resumen de oportunidades perdidas en los últimos N días."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT fecha, tipo, descripcion, monto_requerido, moneda_requerida,
+               ganancia_estimada_perdida, razon
+        FROM oportunidades_perdidas
+        WHERE fecha >= date('now', ?)
+        ORDER BY fecha DESC, hora DESC
+        LIMIT 20
+    """, (f'-{dias} days',)).fetchall()
+    
+    total_perdido = conn.execute("""
+        SELECT COALESCE(SUM(ganancia_estimada_perdida),0)
+        FROM oportunidades_perdidas
+        WHERE fecha >= date('now', ?)
+    """, (f'-{dias} days',)).fetchone()[0]
+    conn.close()
+
+    if not rows:
+        return f"✅ Sin oportunidades perdidas en los últimos {dias} días."
+
+    m = f"📉 *OPORTUNIDADES PERDIDAS — últimos {dias} días*\n"
+    m += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    por_tipo = {}
+    for r in rows:
+        t = r['tipo'] if isinstance(r, dict) else r[1]
+        por_tipo[t] = por_tipo.get(t, 0) + 1
+
+    for r in rows[:10]:
+        if isinstance(r, dict):
+            fecha, tipo, desc, monto, moneda, ganancia, razon = r['fecha'],r['tipo'],r['descripcion'],r['monto_requerido'],r['moneda_requerida'],r['ganancia_estimada_perdida'],r['razon']
+        else:
+            fecha, tipo, desc, monto, moneda, ganancia, razon = r[0],r[1],r[2],r[3],r[4],r[5],r[6]
+        m += f"🔴 `{fecha}` *{tipo}*\n"
+        m += f"   {desc}\n"
+        m += f"   Faltaba: `{monto:,.0f} {moneda}` | Perdiste: `{ganancia:.4f} USDT`\n"
+        m += f"   Razón: _{razon}_\n\n"
+
+    m += f"━━━━━━━━━━━━━━━━━━━━\n"
+    m += f"💸 *Total ganancia perdida: `{total_perdido:.4f} USDT`*\n"
+    
+    causa_principal = max(por_tipo.items(), key=lambda x: x[1]) if por_tipo else ("N/A", 0)
+    m += f"📊 Causa principal: *{causa_principal[0]}* ({causa_principal[1]} veces)\n"
+    m += f"\n_Usa /oportunidades 30 para ver el mes completo_"
+    return m
+
+
 def msg_resumen_corresponsal(nombre):
     conn = get_conn()
     ops = conn.execute("""
@@ -1224,11 +1311,18 @@ def construir_mensaje(d, es_especial=False):
     if d.get('tasa_gsa_clp_cop'):
         m += f"🇨🇱➡️🇨🇴  CLP → COP\n      `{fmt(d['tasa_gsa_clp_cop'],4)}`\n\n"
         m += f"🇨🇴➡️🇨🇱  COP → CLP\n      `{fmt(d['tasa_gsa_cop_clp'],4)}`\n\n"
+    if d.get('tasa_gsa_cop_bs'):
+        m += f"🇨🇴➡️🇻🇪  COP → BS\n      `{fmt(d['tasa_gsa_cop_bs'],4)}`\n\n"
+        m += f"🇻🇪➡️🇨🇴  BS → COP\n      `{fmt(d['tasa_gsa_bs_cop'],4)}`\n\n"
+    if d.get('ban_bs_venta') and d.get('bcv_usd'):
+        tasa_usd_bs = (d.get('ban_bs_venta',0) or 0) + MARGEN_BS
+        m += f"🇺🇸➡️🇻🇪  USD → BS\n      `{fmt(tasa_usd_bs,2)} Bs/USD`\n\n"
     if d.get('dolar_obs'):
         m += f"🇨🇱➡️🇺🇸  CLP → USD\n      `{fmt(d['dolar_obs']+SPREAD_CLP)} CLP`\n\n"
     m += f"━━━━━━━━━━━━━━━━━━━━\n📐 *LÍMITES OPERATIVOS*\n\n"
     if d.get('limite_clp_bs'): m += f"🔴  *Límite CLP/Bs*\n      `{fmt(d['limite_clp_bs'],6)}`\n\n"
     if d.get('limite_clp_cop'): m += f"🔴  *Límite CLP/COP*\n      `{fmt(d['limite_clp_cop'],4)}`\n\n"
+    if d.get('limite_bs_cop'): m += f"🔴  *Límite BS/COP*\n      `{fmt(d['limite_bs_cop'],4)}`\n\n"
     m += "━━━━━━━━━━━━━━━━━━━━"
     return m
 
@@ -1573,6 +1667,209 @@ def formatear_resultado_inteligente(resultado):
 # ══════════════════════════════════════════════════════════════════════
 # CONVERSACIÓN /operacion
 # ══════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════
+# OPERACIÓN RÁPIDA — FORMULARIO DE UNA LÍNEA
+# ══════════════════════════════════════════════════════════════════════
+PLANTILLA_OP = """📋 NUEVA OPERACIÓN
+━━━━━━━━━━━━━━━━━━━━
+Fecha: hoy
+Tipo: CLP-BS
+Cliente: 
+Monto entrada: 
+Tasa: auto
+Método: Copec Pay
+Corresponsal: no
+Entrega física: no
+CXC pendiente: 0
+━━━━━━━━━━━━━━━━━━━━
+Tipos disponibles:
+CLP-BS  BS-CLP  CLP-COP  COP-CLP
+COP-BS  BS-COP  CLP-USDT  USDT-CLP
+BS-USDT  USDT-BS  USD-CLP  CLP-USD
+USD-BS  BS-USD  GIRO-INT"""
+
+def normalizar_tipo(tipo_raw):
+    """Convierte CLP-BS, CLP>BS, CLPBS etc a CLP→BS."""
+    if not tipo_raw: return None
+    t = tipo_raw.strip().upper()
+    # Replace separators with arrow
+    for sep in ['-', '>', ' A ', ' TO ']:
+        t = t.replace(sep, '→')
+    # Map common abbreviations
+    alias = {
+        'GIRO→INT': 'GIRO INT',
+        'GIROINT': 'GIRO INT',
+        'GIRO-INT': 'GIRO INT',
+    }
+    t = alias.get(t, t)
+    # Check if valid
+    if t in TIPOS_OP:
+        return t
+    # Try adding arrow if missing (e.g. CLPBS → CLP→BS)
+    for op in TIPOS_OP:
+        clean = op.replace('→', '')
+        if t.replace('→','') == clean:
+            return op
+    return None
+
+def parsear_operacion_rapida(texto):
+    """Parsea el formulario de operación rápida y retorna datos o error."""
+    lineas = texto.strip().split('\n')
+    datos = {}
+    errores = []
+
+    for linea in lineas:
+        if ':' not in linea: continue
+        clave, _, valor = linea.partition(':')
+        clave = clave.strip().lower()
+        valor = valor.strip()
+        if not valor or valor == '': continue
+
+        if 'fecha' in clave:
+            hoy = today_local()
+            ayer = hoy - datetime.timedelta(days=1)
+            if valor.lower() in ('hoy', 'today', 'h'):
+                datos['fecha'] = str(hoy)
+            elif valor.lower() in ('ayer', 'yesterday', 'a'):
+                datos['fecha'] = str(ayer)
+            else:
+                for fmt_str in ('%d/%m/%Y','%Y-%m-%d','%d-%m-%Y'):
+                    try:
+                        dt = datetime.datetime.strptime(valor, fmt_str)
+                        datos['fecha'] = dt.strftime('%Y-%m-%d')
+                        break
+                    except: pass
+                if 'fecha' not in datos:
+                    errores.append(f"Fecha inválida: `{valor}` — usa hoy, ayer o DD/MM/YYYY")
+
+        elif 'tipo' in clave:
+            tipo = normalizar_tipo(valor)
+            if tipo:
+                datos['tipo_op'] = tipo
+                partes = tipo.replace('→','-').split('-')
+                if len(partes) == 2:
+                    datos['mon_entrada'] = partes[0]
+                    datos['mon_salida'] = partes[1]
+            else:
+                errores.append(f"Tipo inválido: `{valor}` — ej: CLP-BS, BS-CLP")
+
+        elif 'cliente' in clave:
+            if valor:
+                datos['cliente'] = valor
+            else:
+                errores.append("Cliente vacío")
+
+        elif 'monto entrada' in clave or 'monto' in clave:
+            try:
+                datos['monto_entrada'] = float(valor.replace(',','.').replace(' ',''))
+            except:
+                errores.append(f"Monto inválido: `{valor}`")
+
+        elif 'tasa' in clave:
+            if valor.lower() in ('auto', 'automatica', 'automatico', 'a'):
+                datos['tasa'] = 'auto'
+            else:
+                try:
+                    datos['tasa'] = float(valor.replace(',','.'))
+                except:
+                    errores.append(f"Tasa inválida: `{valor}` — usa auto o número")
+
+        elif 'método' in clave or 'metodo' in clave:
+            datos['metodo'] = valor
+
+        elif 'corresponsal' in clave:
+            datos['corresponsal'] = '' if valor.lower() in ('no','ninguno','directo','n') else valor
+
+        elif 'entrega' in clave or 'física' in clave or 'fisica' in clave:
+            datos['entrega_fisica'] = valor.lower() in ('si','sí','s','yes')
+
+        elif 'cxc' in clave:
+            try:
+                datos['cxc_pendiente'] = float(valor.replace(',','.')) if valor.lower() not in ('0','no','n') else 0
+            except:
+                datos['cxc_pendiente'] = 0
+
+    return datos, errores
+
+def procesar_op_rapida(chat_id, texto):
+    """Procesa el formulario de operación rápida."""
+    datos, errores = parsear_operacion_rapida(texto)
+
+    # Validaciones básicas
+    campos_req = ['fecha','tipo_op','cliente','monto_entrada']
+    for campo in campos_req:
+        if campo not in datos:
+            if campo == 'fecha': errores.append("Falta: Fecha")
+            elif campo == 'tipo_op': errores.append("Falta: Tipo")
+            elif campo == 'cliente': errores.append("Falta: Cliente")
+            elif campo == 'monto_entrada': errores.append("Falta: Monto entrada")
+
+    if errores:
+        m = "❌ *Errores en el formulario:*\n\n"
+        for e in errores:
+            m += f"• {e}\n"
+        m += "\n_Corrige y envía de nuevo_"
+        return m
+
+    # Calcular tasa y monto salida
+    t = get_ultima_tasa()
+    tasa_ref = _tasa_sug(datos['tipo_op'], t)
+
+    if datos.get('tasa') == 'auto' or 'tasa' not in datos:
+        if tasa_ref:
+            datos['tasa_cliente'] = tasa_ref
+            datos['tasa_referencia'] = tasa_ref
+            datos['monto_salida'] = _calc_sal(datos['tipo_op'], datos['monto_entrada'], tasa_ref)
+            tasa_usada = f"{tasa_ref} (auto)"
+        else:
+            return "❌ No hay tasa automática disponible para este tipo.\nEscribe la tasa manualmente en el formulario."
+    else:
+        datos['tasa_cliente'] = datos['tasa']
+        datos['tasa_referencia'] = tasa_ref or datos['tasa']
+        datos['monto_salida'] = _calc_sal(datos['tipo_op'], datos['monto_entrada'], datos['tasa'])
+        tasa_usada = str(datos['tasa'])
+
+    # Snapshot tasas
+    datos['snap_pat_bs'] = ((t.get('ban_bs_compra',0) or 0)+(t.get('ban_bs_venta',0) or 0))/2
+    datos['snap_dol_obs'] = t.get('dolar_obs',0) or 0
+    datos['snap_trm'] = t.get('trm',0) or 0
+    datos['hora'] = hora_local()
+    datos['usuario_telegram'] = str(chat_id)
+    datos['estado'] = 'Completada'
+    datos['traslado_bs'] = 0
+    datos['encomienda_cop'] = 0
+    datos['repartidor'] = 'Cristofer Ruiz'
+    datos['usdt_equiv'] = calcular_usdt_equiv(
+        datos.get('mon_entrada',''), datos.get('monto_entrada',0),
+        datos['snap_pat_bs'], datos['snap_dol_obs'])
+
+    if not datos.get('metodo'): datos['metodo'] = 'Copec Pay'
+    if 'corresponsal' not in datos: datos['corresponsal'] = ''
+    if 'cxc_pendiente' not in datos: datos['cxc_pendiente'] = 0
+
+    # Guardar en conversaciones para confirmación
+    conversaciones[chat_id] = {
+        'paso': 'confirmar_rapido',
+        'datos': datos,
+        'tasa_usada': tasa_usada,
+    }
+
+    m = f"📋 *CONFIRMAR OPERACIÓN*\n━━━━━━━━━━━━━━━━━━━━\n"
+    m += f"Fecha: `{datos['fecha']}`\n"
+    m += f"Tipo: `{datos['tipo_op']}`\n"
+    m += f"Cliente: `{datos['cliente']}`\n"
+    m += f"Entrada: `{datos['monto_entrada']:,.2f} {datos.get('mon_entrada','')}`\n"
+    m += f"Salida: `{datos['monto_salida']:,.2f} {datos.get('mon_salida','')}`\n"
+    m += f"Tasa: `{tasa_usada}`\n"
+    m += f"USDT equiv: `{datos['usdt_equiv']:.4f}`\n"
+    m += f"Método: `{datos.get('metodo','')}`\n"
+    if datos.get('corresponsal'): m += f"Corresponsal: `{datos['corresponsal']}`\n"
+    if datos.get('cxc_pendiente',0) > 0: m += f"⚠️ CXC: `{datos['cxc_pendiente']:,.2f} {datos.get('mon_entrada','')}`\n"
+    m += f"━━━━━━━━━━━━━━━━━━━━\n*¿Confirmar?* `si` / `no`"
+    return m
+
+
 conversaciones = {}
 
 def iniciar_operacion(chat_id):
@@ -1587,9 +1884,23 @@ def iniciar_operacion(chat_id):
     return f"💱 *NUEVA OPERACIÓN*\n\n¿Tipo de operación?\n\n{tipos}\n\n_/cancelar para salir_"
 
 def procesar_conv(chat_id, texto):
-    if chat_id not in conversaciones: return "No hay operación activa. Usa /operacion para iniciar."
+    if chat_id not in conversaciones: return "No hay operación activa. Usa /op para iniciar."
     conv=conversaciones[chat_id]; paso=conv['paso']; datos=conv['datos']
     if texto.lower() in ('/cancelar','cancelar'):
+        del conversaciones[chat_id]; return "❌ Operación cancelada."
+
+    # Confirmación de operación rápida
+    if paso == 'confirmar_rapido':
+        if texto.lower() in ('si','sí','s','confirmar','ok'):
+            op_id = guardar_operacion(datos)
+            del conversaciones[chat_id]
+            m  = f"✅ *Op #{op_id} registrada*\n"
+            m += f"Cliente: `{datos['cliente']}`\n"
+            m += f"Tipo: `{datos['tipo_op']}`\n"
+            m += f"USDT: `{datos.get('usdt_equiv',0):.4f}`\n"
+            if datos.get('cxc_pendiente',0)>0: m+=f"⚠️ CXC: `{datos['cxc_pendiente']:,.2f} {datos['mon_entrada']}`\n"
+            m += "_Saldos actualizados_"
+            return m
         del conversaciones[chat_id]; return "❌ Operación cancelada."
 
     if paso==-1:
@@ -1776,6 +2087,10 @@ def procesar(chat_id, texto):
     if hay_conv_activa(chat_id) and not texto.startswith('/'):
         send(chat_id, procesar_conv(chat_id, texto)); return
 
+    # Detectar formulario de operación rápida (contiene "Fecha:" y "Tipo:" y "Cliente:")
+    if 'Fecha:' in texto and 'Tipo:' in texto and 'Cliente:' in texto and not texto.startswith('/'):
+        send(chat_id, procesar_op_rapida(chat_id, texto)); return
+
     if chat_id in esperando_importar and not texto.startswith('/'):
         archivo=texto.strip()
         ruta=os.path.abspath(os.path.join(os.path.dirname(DB_PATH), archivo))
@@ -1887,6 +2202,10 @@ def procesar(chat_id, texto):
         elif sub == 'riesgo': send(chat_id, msg_clientes_riesgo())
         else: send(chat_id, "Uso: `/clientes top` | `/clientes riesgo`")
 
+    elif cmd=='/oportunidades':
+        dias = int(partes[1]) if len(partes) > 1 and partes[1].isdigit() else 7
+        send(chat_id, msg_oportunidades(dias))
+
     elif cmd=='/resumen_corresponsal':
         if len(partes) >= 2:
             nombre = ' '.join(partes[1:])
@@ -1896,7 +2215,8 @@ def procesar(chat_id, texto):
             send(chat_id, f"Uso: `/resumen_corresponsal Bancolombia C1`\n\nCorresponsales:\n{ops_lista}")
 
     # ── OPERACIONES ──
-    elif cmd=='/operacion': send(chat_id, iniciar_operacion(chat_id))
+    elif cmd in ('/op', '/operacion'):
+        send(chat_id, PLANTILLA_OP)
     elif cmd=='/cancelar':
         if hay_conv_activa(chat_id): procesar_conv(chat_id,'/cancelar'); send(chat_id,"❌ Cancelado.")
         elif chat_id in esperando_importar: del esperando_importar[chat_id]; send(chat_id,"❌ Cancelado.")
@@ -2002,7 +2322,7 @@ def procesar(chat_id, texto):
 /capital | /umbral CUENTA MONTO
 
 *💱 OPERACIONES*
-/operacion | /operaciones | /ultima
+/op (operación rápida) | /operaciones | /ultima
 
 *💰 SALDOS*
 /saldo | /caja | /posicion
@@ -2016,6 +2336,7 @@ def procesar(chat_id, texto):
 *👥 CLIENTES*
 /clientes top | /clientes riesgo
 /resumen_corresponsal NOMBRE
+/oportunidades | /oportunidades 30
 
 *⚙️ SISTEMA*
 /importar | /sync | /saldo_inicial CUENTA MONTO
@@ -2143,6 +2464,34 @@ def loop_mercado():
                         alerta_tri = msg_alerta_triangular(500000, clp_ads, ventas_bs, ultimo_datos)
                         if alerta_tri:
                             send(TELEGRAM_CHAT_ID, alerta_tri)
+                        else:
+                            # Calcular si habría sido rentable pero no hay capital
+                            try:
+                                cap = analizar_capital()
+                                clp_disponible = cap['clp_total']
+                                if clp_disponible < 100000 and clp_ads:
+                                    precio_clp = clp_ads[0]['precio']
+                                    precio_venta_bs = ventas_bs[0]['precio'] if ventas_bs else 0
+                                    t = get_ultima_tasa()
+                                    pat_bs = ((t.get('ban_bs_compra',0) or 0)+(t.get('ban_bs_venta',0) or 0))/2 or 1
+                                    dol_obs = t.get('dolar_obs',1) or 1
+                                    monto_ref = 500000
+                                    usdt_ref = monto_ref / precio_clp if precio_clp else 0
+                                    bs_ref = usdt_ref * precio_venta_bs * (1-FEE_USDT_BS) if precio_venta_bs else 0
+                                    clp_ref = bs_ref / pat_bs * dol_obs if pat_bs else 0
+                                    ganancia_ref = clp_ref - monto_ref
+                                    if ganancia_ref > 0:
+                                        ganancia_usdt = ganancia_ref / dol_obs if dol_obs else 0
+                                        registrar_oportunidad_perdida(
+                                            tipo='Triangular CLP→USDT→BS→CLP',
+                                            descripcion=f'Spread BS {spread:.1f} Bs — triangular rentable pero sin capital CLP',
+                                            monto_requerido=monto_ref,
+                                            moneda='CLP',
+                                            ganancia_estimada=round(ganancia_usdt, 4),
+                                            razon=f'Solo {clp_disponible:,.0f} CLP disponible, se necesitan {monto_ref:,.0f} CLP',
+                                        )
+                            except Exception as _oe:
+                                print(f"Error registrando oportunidad: {_oe}")
 
             # Alerta CLP si cambió >= 5 CLP
             if clp_ads:
@@ -2268,41 +2617,4 @@ def main():
         print("❌ TELEGRAM_BOT_TOKEN no configurado"); return
 
     # Iniciar todos los loops
-    threading.Thread(target=loop_tasas,          daemon=True).start()
-    threading.Thread(target=loop_mercado,         daemon=True).start()
-    threading.Thread(target=loop_western_reminder,daemon=True).start()
-    threading.Thread(target=loop_reporte_diario,  daemon=True).start()
-    threading.Thread(target=loop_reporte_semanal, daemon=True).start()
-    threading.Thread(target=loop_gestor_capital,  daemon=True).start()
-    threading.Thread(target=loop_csv,             daemon=True).start()
-
-    supa_msg = "✅ Supabase conectado" if USE_SUPABASE else "⚠️ Supabase no configurado"
-    send(TELEGRAM_CHAT_ID,
-         f"✅ *GSA Cambios Bot v6.0 iniciado*\n"
-         f"{supa_msg}\n"
-         f"📡 Monitoreo de mercado activo\n"
-         f"📊 Historial de precios activado\n"
-         f"💼 Gestor de capital activo\n\n"
-         f"Usa /ayuda para ver los comandos.")
-
-    print("\n✅ Bot v6.0 corriendo...\n")
-
-    while True:
-        try:
-            updates = get_updates(ultimo_offset)
-            for update in updates:
-                ultimo_offset = update["update_id"] + 1
-                if "message" in update:
-                    msg = update["message"]
-                    chat_id = str(msg["chat"]["id"])
-                    texto = msg.get("text", "")
-                    if "document" in msg:
-                        doc = msg["document"]
-                        procesar_documento(chat_id, doc.get("file_id"), doc.get("file_name","archivo"))
-                    elif texto:
-                        procesar(chat_id, texto)
-        except Exception as e:
-            print(f"Error main: {e}"); time.sleep(5)
-
-if __name__ == "__main__":
-    main()
+    threading.Thread(target=loop_tasas,          d
