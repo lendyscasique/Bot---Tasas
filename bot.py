@@ -2617,4 +2617,41 @@ def main():
         print("❌ TELEGRAM_BOT_TOKEN no configurado"); return
 
     # Iniciar todos los loops
-    threading.Thread(target=loop_tasas,          d
+    threading.Thread(target=loop_tasas,          daemon=True).start()
+    threading.Thread(target=loop_mercado,         daemon=True).start()
+    threading.Thread(target=loop_western_reminder,daemon=True).start()
+    threading.Thread(target=loop_reporte_diario,  daemon=True).start()
+    threading.Thread(target=loop_reporte_semanal, daemon=True).start()
+    threading.Thread(target=loop_gestor_capital,  daemon=True).start()
+    threading.Thread(target=loop_csv,             daemon=True).start()
+
+    supa_msg = "✅ Supabase conectado" if USE_SUPABASE else "⚠️ Supabase no configurado"
+    send(TELEGRAM_CHAT_ID,
+         f"✅ *GSA Cambios Bot v6.0 iniciado*\n"
+         f"{supa_msg}\n"
+         f"📡 Monitoreo de mercado activo\n"
+         f"📊 Historial de precios activado\n"
+         f"💼 Gestor de capital activo\n\n"
+         f"Usa /ayuda para ver los comandos.")
+
+    print("\n✅ Bot v6.0 corriendo...\n")
+
+    while True:
+        try:
+            updates = get_updates(ultimo_offset)
+            for update in updates:
+                ultimo_offset = update["update_id"] + 1
+                if "message" in update:
+                    msg = update["message"]
+                    chat_id = str(msg["chat"]["id"])
+                    texto = msg.get("text", "")
+                    if "document" in msg:
+                        doc = msg["document"]
+                        procesar_documento(chat_id, doc.get("file_id"), doc.get("file_name","archivo"))
+                    elif texto:
+                        procesar(chat_id, texto)
+        except Exception as e:
+            print(f"Error main: {e}"); time.sleep(5)
+
+if __name__ == "__main__":
+    main()
