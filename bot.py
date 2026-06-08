@@ -301,26 +301,34 @@ def get_top_anuncios_bs():
     return compras, ventas
 
 def get_top_anuncios_clp():
-    """Retorna top 2 compradores de USDT en CLP (para ti como Maker vendedor)."""
+    """Retorna top 2 compradores Y vendedores de USDT en CLP."""
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json"}
-    try:
-        r = requests.post(url, headers=headers, json={
-            "asset": "USDT", "fiat": "CLP", "merchantCheck": False,
-            "page": 1, "publisherType": None, "rows": 5,
-            "tradeType": "BUY", "payTypes": []}, timeout=10)
-        ads = r.json().get("data", [])
-        result = []
-        for a in ads[:2]:
-            adv = a.get("adv", {})
-            adv2 = a.get("advertiser", {})
-            result.append({
-                "precio": float(adv.get("price", 0)),
-                "usuario": adv2.get("nickName", "—"),
-                "disponible": float(adv.get("surplusAmount", 0)),
-            })
-        return result
-    except: return []
+
+    def fetch(side):
+        try:
+            r = requests.post(url, headers=headers, json={
+                "asset": "USDT", "fiat": "CLP", "merchantCheck": False,
+                "page": 1, "publisherType": None, "rows": 5,
+                "tradeType": side, "payTypes": []}, timeout=10)
+            ads = r.json().get("data", [])
+            result = []
+            for a in ads[:2]:
+                adv = a.get("adv", {})
+                adv2 = a.get("advertiser", {})
+                result.append({
+                    "precio": float(adv.get("price", 0)),
+                    "usuario": adv2.get("nickName", "—"),
+                    "disponible": float(adv.get("surplusAmount", 0)),
+                })
+            return result
+        except: return []
+
+    # SELL = ellos venden USDT → tú compras USDT pagando CLP
+    # BUY  = ellos compran USDT → tú vendes USDT recibiendo CLP
+    compras_clp = fetch("SELL")  # precio más bajo = mejor para comprar
+    ventas_clp  = fetch("BUY")   # precio más alto = mejor para vender
+    return compras_clp, ventas_clp
 
 def get_top_anuncios_cop():
     """Top 2 compradores COP."""
@@ -742,11 +750,21 @@ def msg_mercado():
         m += f"  💡 Tu precio de venta sugerido: `{ventas_bs[0]['precio']+1:.2f} Bs`\n"
 
     m += "\n━━━━━━━━━━━━━━━━━━━━\n"
-    m += "🇨🇱 *BINANCE CLP (compradores de USDT):*\n"
-    if clp_ads:
-        for i, a in enumerate(clp_ads, 1):
+    m += "🇨🇱 *BINANCE CLP*\n\n"
+    
+    compras_clp, ventas_clp = clp_ads if isinstance(clp_ads, tuple) else ([], clp_ads)
+    
+    if compras_clp:
+        m += "📥 *Compra USDT (pagas CLP, recibes USDT):*\n"
+        for i, a in enumerate(compras_clp, 1):
             m += f"  {i}️⃣ `{a['usuario']:15s}` `{a['precio']:,.2f} CLP` | `{a['disponible']:.2f} USDT` disp.\n"
-        m += f"\n  💡 Para ser competitivo: publica a `{clp_ads[0]['precio']+1:.2f} CLP`\n"
+        m += f"  💡 Mejor precio de compra: `{compras_clp[0]['precio']:,.2f} CLP`\n\n"
+
+    if ventas_clp:
+        m += "📤 *Venta USDT (entregas USDT, recibes CLP):*\n"
+        for i, a in enumerate(ventas_clp, 1):
+            m += f"  {i}️⃣ `{a['usuario']:15s}` `{a['precio']:,.2f} CLP` | `{a['disponible']:.2f} USDT` disp.\n"
+        m += f"  💡 Para ser competitivo: publica a `{ventas_clp[0]['precio']+1:.2f} CLP`\n"
 
     return m
 
@@ -768,14 +786,19 @@ def msg_alerta_bs(compras_bs, ventas_bs, spread):
         m += f"\n💡 Publica venta a: `{ventas_bs[0]['precio']+1:.2f} Bs`"
     return m
 
-def msg_alerta_clp(clp_ads):
+def msg_alerta_clp(compras_clp, ventas_clp):
     """Mensaje de alerta cuando el precio CLP cambia."""
-    m = f"🇨🇱 *PRECIO CLP ACTUALIZADO*\n\n"
-    m += "*Compradores de USDT disponibles:*\n"
-    for i, a in enumerate(clp_ads, 1):
-        m += f"  {i}️⃣ `{a['usuario']:12s}` `{a['precio']:,.2f} CLP` | `{a['disponible']:.1f} USDT`\n"
-    if clp_ads:
-        m += f"\n💡 Para ser competitivo: publica a `{clp_ads[0]['precio']+1:.2f} CLP`"
+    m = f"🇨🇱 *MERCADO CLP ACTUALIZADO*\n\n"
+    if compras_clp:
+        m += "📥 *Compra USDT (pagas CLP):*\n"
+        for i, a in enumerate(compras_clp, 1):
+            m += f"  {i}️⃣ `{a['usuario']:12s}` `{a['precio']:,.2f} CLP` | `{a['disponible']:.1f} USDT`\n"
+        m += f"  💡 Mejor precio compra: `{compras_clp[0]['precio']:,.2f} CLP`\n\n"
+    if ventas_clp:
+        m += "📤 *Venta USDT (recibes CLP):*\n"
+        for i, a in enumerate(ventas_clp, 1):
+            m += f"  {i}️⃣ `{a['usuario']:12s}` `{a['precio']:,.2f} CLP` | `{a['disponible']:.1f} USDT`\n"
+        m += f"  💡 Para ser competitivo: publica a `{ventas_clp[0]['precio']+1:.2f} CLP`"
     return m
 
 def msg_alerta_triangular(monto_clp, clp_ads, ventas_bs, t):
@@ -1289,41 +1312,67 @@ def construir_mensaje(d, es_especial=False):
     ahora = now_local().strftime("%d/%m/%Y — %I:%M %p")
     ban_s = d.get('ban_bs_spread',0) or 0
     mer_s = d.get('mer_bs_spread',0) or 0
+    mejor = d.get('mejor_banco','—')
     prefijo = "🔔 *TASA DE REFERENCIA*\n" if es_especial else ""
+
     m  = f"{prefijo}📊 *RESUMEN DE TASAS*\n📅 {ahora}\n━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    # TASAS OFICIALES
     m += "🌎 *TASAS OFICIALES*\n\n"
-    if d.get('trm'): m += f"🇨🇴  *TRM*\n      `{fmt(d['trm'])} COP`\n\n"
-    if d.get('bcv_usd'): m += f"🏦  *USD/BCV*\n      `{fmt(d['bcv_usd'])} Bs`\n\n"
+    if d.get('trm'):         m += f"🇨🇴  *TRM*\n      `{fmt(d['trm'])} COP`\n\n"
+    if d.get('bcv_usd'):     m += f"🏦  *USD/BCV*\n      `{fmt(d['bcv_usd'])} Bs`\n\n"
     if d.get('ban_bs_venta'):
         m += f"🏦  *Binance Banesco* {spread_emoji(ban_s)}\n      Compra: `{fmt(d['ban_bs_compra'])} Bs` | Venta: `{fmt(d['ban_bs_venta'])} Bs`\n      Spread: `{fmt(ban_s)} Bs`\n\n"
     if d.get('mer_bs_venta'):
         m += f"🏦  *Binance Mercantil* {spread_emoji(mer_s)}\n      Compra: `{fmt(d['mer_bs_compra'])} Bs` | Venta: `{fmt(d['mer_bs_venta'])} Bs`\n      Spread: `{fmt(mer_s)} Bs`\n\n"
-    m += f"⭐ *Mejor opción: {d.get('mejor_banco','—')}*\n\n"
-    if d.get('clp_venta'): m += f"🔵  *Binance USDT/CLP*\n      Compra: `{fmt(d['clp_compra'])} CLP` | Venta: `{fmt(d['clp_venta'])} CLP`\n\n"
-    if d.get('cop_venta'): m += f"🔵  *Binance USDT/COP*\n      Compra: `{fmt(d['cop_compra'])} COP` | Venta: `{fmt(d['cop_venta'])} COP`\n\n"
-    if d.get('dolar_obs'): m += f"🇨🇱  *Dólar Observado*\n      `{fmt(d['dolar_obs'])} CLP`\n\n"
-    if d.get('western'): m += f"🌍  *Western Unión*\n      `{fmt(d['western'],4)} CLP/COP`\n\n"
-    else: m += f"🌍  *Western Unión*\n      _Envía /western TASA_\n\n"
-    m += f"━━━━━━━━━━━━━━━━━━━━\n💱 *GSA CAMBIOS*\n\n"
+    m += f"⭐ *Mejor opción: {mejor}*\n\n"
+    if d.get('clp_venta'):   m += f"🔵  *Binance USDT/CLP*\n      Compra: `{fmt(d['clp_compra'])} CLP` | Venta: `{fmt(d['clp_venta'])} CLP`\n\n"
+    if d.get('cop_venta'):   m += f"🔵  *Binance USDT/COP*\n      Compra: `{fmt(d['cop_compra'])} COP` | Venta: `{fmt(d['cop_venta'])} COP`\n\n"
+    if d.get('dolar_obs'):   m += f"🇨🇱  *Dólar Observado*\n      `{fmt(d['dolar_obs'])} CLP`\n\n"
+    if d.get('western'):     m += f"🌍  *Western Unión*\n      `{fmt(d['western'],4)} CLP/COP`\n\n"
+    else:                    m += f"🌍  *Western Unión*\n      _Envía /western TASA_\n\n"
+
+    # GSA CAMBIOS — organizado por categorías
+    m += f"━━━━━━━━━━━━━━━━━━━━\n💱 *GSA CAMBIOS*\n_Calculado con {mejor}_\n\n"
+
+    # Giros
+    m += f"📌 *Giros*\n"
     if d.get('tasa_gsa_clp_bs'):
-        m += f"🇨🇱➡️🇻🇪  CLP → Bs\n      `{fmt(d['tasa_gsa_clp_bs'],6)}`\n\n"
-        m += f"🇻🇪➡️🇨🇱  Bs → CLP\n      `{fmt(d['tasa_gsa_bs_clp'],6)}`\n\n"
+        m += f"🇨🇱➡️🇻🇪  CLP → Bs      `{fmt(d['tasa_gsa_clp_bs'],6)}`\n"
+        m += f"🇻🇪➡️🇨🇱  Bs → CLP      `{fmt(d['tasa_gsa_bs_clp'],6)}`\n"
     if d.get('tasa_gsa_clp_cop'):
-        m += f"🇨🇱➡️🇨🇴  CLP → COP\n      `{fmt(d['tasa_gsa_clp_cop'],4)}`\n\n"
-        m += f"🇨🇴➡️🇨🇱  COP → CLP\n      `{fmt(d['tasa_gsa_cop_clp'],4)}`\n\n"
-    if d.get('tasa_gsa_cop_bs'):
-        m += f"🇨🇴➡️🇻🇪  COP → BS\n      `{fmt(d['tasa_gsa_cop_bs'],4)}`\n\n"
-        m += f"🇻🇪➡️🇨🇴  BS → COP\n      `{fmt(d['tasa_gsa_bs_cop'],4)}`\n\n"
-    if d.get('ban_bs_venta') and d.get('bcv_usd'):
-        tasa_usd_bs = (d.get('ban_bs_venta',0) or 0) + MARGEN_BS
-        m += f"🇺🇸➡️🇻🇪  USD → BS\n      `{fmt(tasa_usd_bs,2)} Bs/USD`\n\n"
+        m += f"🇨🇱➡️🇨🇴  CLP → COP     `{fmt(d['tasa_gsa_clp_cop'],4)}`\n"
+        m += f"🇨🇴➡️🇨🇱  COP → CLP     `{fmt(d['tasa_gsa_cop_clp'],4)}`\n"
     if d.get('dolar_obs'):
-        m += f"🇨🇱➡️🇺🇸  CLP → USD\n      `{fmt(d['dolar_obs']+SPREAD_CLP)} CLP`\n\n"
+        m += f"🇨🇱➡️🇺🇸  CLP → USD     `{fmt(d['dolar_obs']+SPREAD_CLP)} CLP`\n"
+        m += f"🇺🇸➡️🇨🇱  USD → CLP     `{fmt(d['dolar_obs']-SPREAD_CLP)} CLP`\n"
+    m += "\n"
+
+    # Compra/Venta Bolívares
+    m += f"📌 *Compra / Venta Bolívares*\n"
+    if d.get('ban_bs_venta'):
+        tasa_usd_bs = (d.get('ban_bs_venta',0) or 0) + MARGEN_BS
+        tasa_bs_usd = (d.get('ban_bs_compra',0) or 0) - MARGEN_BS
+        m += f"🇺🇸➡️🇻🇪  USD → Bs      `{fmt(tasa_usd_bs,2)} Bs`\n"
+        m += f"🇻🇪➡️🇺🇸  Bs → USD      `{fmt(tasa_bs_usd,2)} Bs`\n"
+    if d.get('tasa_gsa_cop_bs'):
+        m += f"🇨🇴➡️🇻🇪  COP → Bs      `{fmt(d['tasa_gsa_cop_bs'],4)}`\n"
+        m += f"🇻🇪➡️🇨🇴  Bs → COP      `{fmt(d['tasa_gsa_bs_cop'],4)}`\n"
+    m += "\n"
+
+    # Compra/Venta Pesos Colombianos
+    if d.get('cop_venta'):
+        m += f"📌 *Compra / Venta Pesos Colombianos*\n"
+        m += f"🇺🇸➡️🇨🇴  USD → COP     `{fmt(d['cop_venta'],2)} COP`\n"
+        m += f"🇨🇴➡️🇺🇸  COP → USD     `{fmt(d['cop_compra'],2)} COP`\n"
+        m += "\n"
+
+    # Límites
     m += f"━━━━━━━━━━━━━━━━━━━━\n📐 *LÍMITES OPERATIVOS*\n\n"
-    if d.get('limite_clp_bs'): m += f"🔴  *Límite CLP/Bs*\n      `{fmt(d['limite_clp_bs'],6)}`\n\n"
+    if d.get('limite_clp_bs'):  m += f"🔴  *Límite CLP/Bs*\n      `{fmt(d['limite_clp_bs'],6)}`\n\n"
     if d.get('limite_clp_cop'): m += f"🔴  *Límite CLP/COP*\n      `{fmt(d['limite_clp_cop'],4)}`\n\n"
-    if d.get('limite_bs_cop'): m += f"🔴  *Límite BS/COP*\n      `{fmt(d['limite_bs_cop'],4)}`\n\n"
-    m += "━━━━━━━━━━━━━━━━━━━━"
+    if d.get('limite_bs_cop'):  m += f"🔴  *Límite Bs/COP*\n      `{fmt(d['limite_bs_cop'],4)}`\n\n"
+    m += f"━━━━━━━━━━━━━━━━━━━━\n🏦 *Banco recomendado: {mejor}*"
     return m
 
 GRUPOS_CUENTAS = {
@@ -2109,7 +2158,7 @@ def procesar(chat_id, texto):
 
     elif cmd=='/western':
         if len(partes)>=2:
-            try:
+        try:
                 western_rate=float(partes[1].replace(',','.'))
                 set_config('western_actualizado_hoy', str(today_local()))
                 send(chat_id,f"✅ Western: `{western_rate}` — Recordatorio cancelado para hoy.")
@@ -2448,8 +2497,9 @@ def loop_mercado():
             cop_ads = get_top_anuncios_cop()
 
             # Guardar historial silenciosamente (siempre)
+            compras_clp_h, ventas_clp_h = clp_ads if isinstance(clp_ads, tuple) else ([], clp_ads)
             if compras_bs or ventas_bs:
-                guardar_precio_historico(compras_bs, ventas_bs, clp_ads, cop_ads)
+                guardar_precio_historico(compras_bs, ventas_bs, compras_clp_h, cop_ads)
 
             # Alerta BS si spread >= 10 y cambió >= 2 Bs
             if compras_bs and ventas_bs:
@@ -2494,11 +2544,14 @@ def loop_mercado():
                                 print(f"Error registrando oportunidad: {_oe}")
 
             # Alerta CLP si cambió >= 5 CLP
-            if clp_ads:
-                precio_clp = clp_ads[0]['precio']
-                if abs(precio_clp - ultimo_precio_clp) >= CAMBIO_MIN_CLP:
-                    send(TELEGRAM_CHAT_ID, msg_alerta_clp(clp_ads))
-                    ultimo_precio_clp = precio_clp
+            compras_clp, ventas_clp = clp_ads if isinstance(clp_ads, tuple) else ([], clp_ads)
+            if compras_clp:
+                precio_compra_clp = compras_clp[0]['precio']
+                precio_venta_clp  = ventas_clp[0]['precio'] if ventas_clp else 0
+                precio_ref = precio_venta_clp or precio_compra_clp
+                if abs(precio_ref - ultimo_precio_clp) >= CAMBIO_MIN_CLP:
+                    send(TELEGRAM_CHAT_ID, msg_alerta_clp(compras_clp, ventas_clp))
+                    ultimo_precio_clp = precio_ref
 
         except Exception as e:
             print(f"Error loop_mercado: {e}")
