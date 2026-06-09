@@ -411,10 +411,39 @@ def get_binance_fiat_promedio(fiat):
     return fetch("SELL"), fetch("BUY")
 
 def get_dolar_observado():
+    # Primero intentar mindicador.cl
     try:
-        data = requests.get("https://mindicador.cl/api/dolar",timeout=10).json()
-        return float(data["serie"][0]["valor"])
-    except: return None
+        data = requests.get("https://mindicador.cl/api/dolar", timeout=10).json()
+        valor = float(data["serie"][0]["valor"])
+        if valor and valor > 500:  # Validar que sea un valor razonable
+            set_config('ultimo_dolar_obs', str(valor))
+            return valor
+    except: pass
+
+    # Fallback 1: usar último valor guardado en config
+    try:
+        ultimo = get_config('ultimo_dolar_obs', '')
+        if ultimo:
+            print(f"[dolar_obs] usando último valor guardado: {ultimo}")
+            return float(ultimo)
+    except: pass
+
+    # Fallback 2: usar precio Binance CLP compra como referencia
+    try:
+        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+        r = requests.post(url, headers={"Content-Type": "application/json"}, json={
+            "asset": "USDT", "fiat": "CLP", "merchantCheck": False,
+            "page": 1, "publisherType": None, "rows": 3,
+            "tradeType": "SELL", "payTypes": []}, timeout=10)
+        ads = r.json().get("data", [])
+        prices = [float(a["adv"]["price"]) for a in ads[:3]]
+        if prices:
+            precio_ref = round(sum(prices)/len(prices), 2)
+            print(f"[dolar_obs] usando Binance CLP como referencia: {precio_ref}")
+            return precio_ref
+    except: pass
+
+    return None
 
 def get_trm():
     try:
@@ -4557,9 +4586,11 @@ def loop_mercado():
 
             if spread_maker > 0:
                 precio_venta_mk = precio_venta_maker
-                if spread_maker >= SPREAD_MIN_ALERTA and abs(precio_venta_mk - ultimo_precio_bs_venta) >= SPREAD_CAMBIO_BS:
+                # Alerta cada 5 min si spread >= 10 Bs y cambio >= 0.5 Bs
+                spread_cambio = abs(spread_maker - ultimo_precio_bs_venta)
+                if spread_maker >= SPREAD_MIN_ALERTA and spread_cambio >= 0.5:
                     send(TELEGRAM_CHAT_ID, msg_alerta_bs(mk_c, mk_v, spread_maker))
-                    ultimo_precio_bs_venta = precio_venta_mk
+                    ultimo_precio_bs_venta = spread_maker
                     msg_opt = msg_momento_optimo(mk_c, mk_v, spread_maker, tendencia)
                     if msg_opt:
                         send(TELEGRAM_CHAT_ID, msg_opt)
@@ -4577,7 +4608,7 @@ def loop_mercado():
                     alerta_cayendo = msg_alerta_spread_cayendo(spread_maker)
                     if alerta_cayendo:
                         send(TELEGRAM_CHAT_ID, alerta_cayendo)
-                    ultimo_precio_bs_venta = precio_venta_maker
+                    ultimo_precio_bs_venta = spread_maker
 
                     # Verificar arbitraje triangular si hay datos CLP
                     compras_clp_tri = clp_ads[0] if isinstance(clp_ads, tuple) else clp_ads
