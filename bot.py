@@ -2695,6 +2695,103 @@ def procesar(chat_id, texto):
                     m2 += f"`{nombre2}`: `{r2['saldo']:,.2f} {r2['moneda']}`\n"
                 send(chat_id, m2)
 
+    elif cmd=='/eliminar_operaciones':
+        if len(partes) < 2:
+            send(chat_id, "Uso:\n/eliminar_operaciones 01/06/2026\n/eliminar_operaciones todo")
+            return
+
+        sub = partes[1].lower()
+
+        # Pedir confirmación si no viene "confirmar"
+        confirmar = len(partes) >= 3 and partes[2].lower() == 'confirmar'
+
+        if not confirmar:
+            if sub == 'todo':
+                send(chat_id,
+                    "⚠️ *ELIMINAR TODAS LAS OPERACIONES*\n\n"
+                    "Esto borrará:\n"
+                    "• Todas las operaciones\n"
+                    "• Todos los cierres diarios\n"
+                    "• Todo el inventario\n"
+                    "• Todos los saldos\n\n"
+                    "El ledger mantendrá el registro de esta acción.\n\n"
+                    "Para confirmar escribe:\n"
+                    "`/eliminar_operaciones todo confirmar`")
+            else:
+                try:
+                    import datetime as dt2
+                    fecha_iso = dt2.datetime.strptime(sub, '%d/%m/%Y').strftime('%Y-%m-%d')
+                    conn = get_conn()
+                    cnt = conn.execute("SELECT COUNT(*) as c FROM operaciones WHERE fecha=?", (fecha_iso,)).fetchone()['c']
+                    conn.close()
+                    send(chat_id,
+                        f"⚠️ *ELIMINAR OPERACIONES DEL {sub}*\n\n"
+                        f"Se eliminarán `{cnt}` operaciones.\n"
+                        f"El ledger registrará esta acción.\n\n"
+                        f"Para confirmar escribe:\n"
+                        f"`/eliminar_operaciones {sub} confirmar`")
+                except:
+                    send(chat_id, "Fecha inválida. Usa formato DD/MM/YYYY")
+            return
+
+        # Ejecutar eliminación
+        conn = get_conn()
+        if sub == 'todo':
+            # Contar todo
+            cnt_ops = conn.execute("SELECT COUNT(*) as c FROM operaciones").fetchone()['c']
+            cnt_ses = conn.execute("SELECT COUNT(*) as c FROM binance_sesiones").fetchone()['c']
+
+            # Registrar en ledger antes de borrar
+            ledger_insert('AJUSTE_AUDITADO', 'APERTURA', 'APERTURA', 'USDT', 0,
+                descripcion=f"ELIMINACION TOTAL: {cnt_ops} operaciones, {cnt_ses} sesiones Binance",
+                usuario=str(chat_id))
+
+            # Borrar todo
+            conn.execute("DELETE FROM operaciones")
+            conn.execute("DELETE FROM binance_sesiones")
+            conn.execute("DELETE FROM cierres_diarios")
+            conn.execute("DELETE FROM costos_operacion")
+            conn.execute("DELETE FROM inventario_usdt")
+            conn.execute("DELETE FROM saldos_iniciales")
+            conn.execute("DELETE FROM patrimonio_inicial")
+            conn.execute("UPDATE saldos SET saldo=0, ultima_actualizacion=CURRENT_TIMESTAMP")
+            conn.commit(); conn.close()
+
+            # Reset inventario
+            init_inventario()
+
+            send(chat_id,
+                f"✅ *ELIMINACIÓN COMPLETA*\n\n"
+                f"Eliminadas: `{cnt_ops}` operaciones\n"
+                f"Sesiones Binance: `{cnt_ses}`\n"
+                f"Saldos reseteados a 0\n\n"
+                f"Registrado en ledger.\n"
+                f"Usa /saldo_inicial para configurar saldos iniciales.")
+        else:
+            try:
+                import datetime as dt2
+                fecha_iso = dt2.datetime.strptime(sub, '%d/%m/%Y').strftime('%Y-%m-%d')
+                cnt = conn.execute("SELECT COUNT(*) as c FROM operaciones WHERE fecha=?", (fecha_iso,)).fetchone()['c']
+
+                # Registrar en ledger
+                ledger_insert('AJUSTE_AUDITADO', 'APERTURA', 'APERTURA', 'USDT', 0,
+                    descripcion=f"ELIMINACION fecha {fecha_iso}: {cnt} operaciones",
+                    usuario=str(chat_id))
+
+                # Borrar
+                conn.execute("DELETE FROM operaciones WHERE fecha=?", (fecha_iso,))
+                conn.execute("DELETE FROM costos_operacion WHERE fecha=?", (fecha_iso,))
+                conn.commit(); conn.close()
+
+                send(chat_id,
+                    f"✅ *ELIMINADAS {cnt} OPERACIONES*\n"
+                    f"Fecha: `{sub}`\n"
+                    f"Registrado en ledger.\n\n"
+                    f"_Los saldos pueden necesitar ajuste manual con /ajuste_")
+            except Exception as e:
+                conn.close()
+                send(chat_id, f"Error: {e}")
+
     # ── KPIs ──
     elif cmd=='/kpi':
         send(chat_id, "⏳ Calculando KPIs...")
