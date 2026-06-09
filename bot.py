@@ -822,22 +822,27 @@ def msg_mercado():
 
     return m
 
-def msg_alerta_bs(compras_bs, ventas_bs, spread):
+def msg_alerta_bs(compras_bs, ventas_bs, spread, precio_compra=0, precio_venta=0):
     """Mensaje de alerta cuando el spread BS supera el umbral."""
     if spread >= SPREAD_PREMIUM: emoji, nivel = "🚀", "PREMIUM"
     elif spread >= SPREAD_BUENO: emoji, nivel = "🟢", "BUENO"
     else: emoji, nivel = "🟡", "MODERADO"
 
-    m = f"{emoji} *SEÑAL BS — {nivel}* | Spread: `{spread:.2f} Bs`\n\n"
+    m = f"{emoji} *SEÑAL BS — {nivel}* | Spread: `{spread:.2f} Bs`\n"
+    # Mostrar precios promedio del mercado (fuente del spread)
+    if precio_compra and precio_venta:
+        m += f"Compra promedio: `{precio_compra:.2f} Bs` | Venta promedio: `{precio_venta:.2f} Bs`\n\n"
+
+    # Mostrar anuncios reales disponibles
     if compras_bs:
-        m += "📥 *Compra:*\n"
+        m += "📥 *Compra (pagas Bs, recibes USDT):*\n"
         for i, a in enumerate(compras_bs, 1):
             m += f"  {i}️⃣ `{a['usuario']:12s}` `{a['precio']:,.2f} Bs` | `{a['disponible']:.1f} USDT`\n"
     if ventas_bs:
-        m += "\n📤 *Venta:*\n"
+        m += "\n📤 *Venta (vendes USDT, recibes Bs):*\n"
         for i, a in enumerate(ventas_bs, 1):
             m += f"  {i}️⃣ `{a['usuario']:12s}` `{a['precio']:,.2f} Bs` | `{a['disponible']:.1f} USDT`\n"
-        m += f"\n💡 Publica venta a: `{ventas_bs[0]['precio']+1:.2f} Bs`"
+        m += f"\n💡 Publica venta a: `{precio_venta+1:.2f} Bs`"
     return m
 
 def msg_alerta_clp(compras_clp, ventas_clp):
@@ -4550,22 +4555,11 @@ def loop_mercado():
 
     while True:
         try:
-            # Obtener anuncios reales top 2 para historial y alertas
-            compras_bs, ventas_bs = get_top_anuncios_bs()
-            clp_ads = get_top_anuncios_clp()
-            cop_ads = get_top_anuncios_cop()
-
-            # Guardar historial silenciosamente (siempre)
-            compras_clp_h, ventas_clp_h = clp_ads if isinstance(clp_ads, tuple) else ([], clp_ads)
-            if compras_bs or ventas_bs:
-                guardar_precio_historico(compras_bs, ventas_bs, compras_clp_h, cop_ads)
-
-            # Calcular spread usando la MISMA fuente que /tasas
-            # (promedio de 3 anuncios con transAmount=1000 por banco)
+            # FUENTE ÚNICA: get_binance_banco_promedio para spread y alertas
             ban_c, ban_v, ban_s = get_binance_banco_promedio("Banesco")
             mer_c, mer_v, mer_s = get_binance_banco_promedio("Mercantil")
 
-            # Mejor banco y spread
+            # Mejor banco = el de mayor spread
             if (mer_s or 0) > (ban_s or 0):
                 mejor_banco = "Mercantil"
                 spread_maker = mer_s or 0
@@ -4577,19 +4571,30 @@ def loop_mercado():
                 precio_compra_maker = ban_c or 0
                 precio_venta_maker  = ban_v or 0
 
-            tendencia = analizar_tendencia_spread(spread_maker) if spread_maker > 0 else None
-            print(f"[loop_mercado] spread_maker={spread_maker:.2f} ({mejor_banco}) umbral={SPREAD_MIN_ALERTA} clp_ads={bool(clp_ads)}")
+            # Anuncios reales top 2 para mostrar en alertas y guardar historial
+            compras_bs, ventas_bs = get_top_anuncios_bs(min_trans_ves=1000)
+            clp_ads = get_top_anuncios_clp()
+            cop_ads = get_top_anuncios_cop()
 
-            # Para mostrar en alertas, usar anuncios reales top 2
-            mk_c = compras_bs
-            mk_v = ventas_bs
+            # Guardar historial con precios reales
+            compras_clp_h, ventas_clp_h = clp_ads if isinstance(clp_ads, tuple) else ([], clp_ads)
+            if compras_bs or ventas_bs:
+                guardar_precio_historico(compras_bs, ventas_bs, compras_clp_h, cop_ads)
+
+            # Construir mk_c y mk_v desde el banco ganador para mostrar en alertas
+            # Usando precio promedio pero mostrando anuncios reales del mejor banco
+            mk_c = compras_bs  # anuncios reales compra
+            mk_v = ventas_bs   # anuncios reales venta
+
+            tendencia = analizar_tendencia_spread(spread_maker) if spread_maker > 0 else None
+            print(f"[mercado] {mejor_banco} compra={precio_compra_maker} venta={precio_venta_maker} spread={spread_maker:.2f} umbral={SPREAD_MIN_ALERTA}")
 
             if spread_maker > 0:
                 precio_venta_mk = precio_venta_maker
                 # Alerta cada 5 min si spread >= 10 Bs y cambio >= 0.5 Bs
                 spread_cambio = abs(spread_maker - ultimo_precio_bs_venta)
                 if spread_maker >= SPREAD_MIN_ALERTA and spread_cambio >= 0.5:
-                    send(TELEGRAM_CHAT_ID, msg_alerta_bs(mk_c, mk_v, spread_maker))
+                    send(TELEGRAM_CHAT_ID, msg_alerta_bs(mk_c, mk_v, spread_maker, precio_compra_maker, precio_venta_maker))
                     ultimo_precio_bs_venta = spread_maker
                     msg_opt = msg_momento_optimo(mk_c, mk_v, spread_maker, tendencia)
                     if msg_opt:
