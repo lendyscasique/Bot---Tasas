@@ -242,6 +242,7 @@ def init_db():
         actualizado DATETIME DEFAULT CURRENT_TIMESTAMP)""")
     conn.commit(); conn.close()
     print("✅ Base de datos v6.0 lista")
+    init_inventario()
 
 def init_saldos():
     cuentas = {
@@ -1355,6 +1356,37 @@ def consultar_y_guardar(western_rate=None):
     return datos
 
 def guardar_operacion(datos):
+    # Calcular ganancia de inventario si aplica
+    tipo_op = datos.get('tipo_op', '')
+    resultado_inv = None
+
+    # Si la operación involucra venta de USDT (consume inventario)
+    if tipo_op in ('USDT→BS', 'CLP→BS', 'COP→BS'):
+        t = get_ultima_tasa()
+        precio_venta_bs = datos.get('snap_pat_bs', 0) or t.get('ban_bs_venta', 0) or 0
+        usdt_a_vender = datos.get('usdt_equiv', 0) or 0
+        if usdt_a_vender > 0 and precio_venta_bs > 0:
+            resultado_inv = consumir_inventario(usdt_a_vender, precio_venta_bs)
+            datos['gan_financiera_bs'] = resultado_inv['ganancia_financiera_bs']
+            datos['gan_financiera_usdt'] = resultado_inv['ganancia_financiera_usdt']
+            datos['cpp_usado'] = resultado_inv['cpp_efectivo']
+            datos['usdt_de_inventario'] = resultado_inv['usdt_de_inventario']
+            datos['usdt_comprado_ahora'] = resultado_inv['usdt_comprado_ahora']
+
+    # Si la operación compra USDT (agrega al inventario)
+    elif tipo_op in ('BS→USDT', 'CLP→USDT'):
+        precio_compra = datos.get('tasa_cliente', 0) or 0
+        usdt_comprado = datos.get('monto_salida', 0) or 0
+        if usdt_comprado > 0 and precio_compra > 0:
+            actualizar_inventario_compra(usdt_comprado, precio_compra)
+
+    # Calcular ganancia comercial
+    t = get_ultima_tasa()
+    gan_comercial = calcular_ganancia_comercial(
+        tipo_op, datos.get('monto_entrada',0),
+        datos.get('tasa_cliente',0), t)
+    datos['gan_comercial_usdt'] = gan_comercial
+
     if USE_SUPABASE:
         supa_data = {k: str(v) if isinstance(v, (dict,list)) else v
                      for k, v in datos.items()
@@ -1387,6 +1419,22 @@ def guardar_operacion(datos):
         com = datos['usdt_equiv'] * 0.025
         c.execute("INSERT INTO cuentas_pendientes (tipo,contraparte,concepto,monto,moneda,vencimiento,op_origen_id) VALUES (?,?,?,?,'USDT',date('now','+7 days'),?)",
                   ('CXP',datos['corresponsal'],f"Comisión 2.5% Op#{op_id}",round(com,4),op_id))
+    # Registrar costos en ledger
+    costos = calcular_costos_operacion(datos)
+    for costo in costos:
+        registrar_costo_operacion(op_id, costo['tipo'],
+            costo['descripcion'], costo['monto'], costo['moneda'])
+
+    # Registrar en ledger
+    ledger_insert('OPERACION_CLIENTE',
+        datos.get('mon_sal','') or 'CAJA',
+        datos.get('mon_entrada','') or 'CAJA',
+        datos.get('mon_entrada','USDT'),
+        datos.get('monto_entrada',0) or 0,
+        ref_id=op_id, ref_tipo='operacion',
+        descripcion=f"Op#{op_id} {datos.get('tipo_op','')} {datos.get('cliente','')}",
+        usuario=datos.get('usuario_telegram','sistema'))
+
     conn.commit(); conn.close()
     return op_id
 
@@ -1810,8 +1858,14 @@ def importar_c2c_inteligente(ruta_archivo, db_path, usuario='importacion'):
             if _ex2: _omit+=1; continue
             if _o['tipo']=='Buy':
                 _top='BS→USDT';_me='BS';_ment=_o['total'];_ms='USDT';_msal=_o['cantidad']-_o['maker_fee']
+                # Actualizar inventario: compramos USDT
+                if _msal > 0 and _o['precio'] > 0:
+                    actualizar_inventario_compra(_msal, _o['precio'])
             else:
                 _top='USDT→BS';_me='USDT';_ment=_o['cantidad'];_ms='BS';_msal=_o['total']
+                # Consumir inventario: vendemos USDT
+                if _ment > 0 and _o['precio'] > 0:
+                    consumir_inventario(_ment, _o['precio'])
             try:
                 _conn.execute("""INSERT INTO operaciones
                     (fecha,hora,cliente,tipo_op,mon_entrada,monto_entrada,mon_salida,monto_salida,
@@ -2164,6 +2218,18 @@ def procesar_conv(chat_id, texto):
             m += f"Tipo: `{datos['tipo_op']}`\n"
             m += f"USDT: `{datos.get('usdt_equiv',0):.4f}`\n"
             if datos.get('cxc_pendiente',0)>0: m+=f"⚠️ CXC: `{datos['cxc_pendiente']:,.2f} {datos['mon_entrada']}`\n"
+            # Mostrar desglose de ganancia si hay datos de inventario
+            if datos.get('gan_comercial_usdt',0) > 0:
+                m += f"\n💼 Ganancia comercial: `{datos['gan_comercial_usdt']:.4f} USDT`\n"
+            if datos.get('gan_financiera_usdt',0) > 0:
+                m += f"💰 Ganancia financiera: `{datos['gan_financiera_usdt']:.4f} USDT`\n"
+                m += f"   (inventario CPP `{datos.get('cpp_usado',0):.2f} Bs`)\n"
+            inv = get_inventario()
+            if inv['cantidad'] > 0:
+                gan_lat_bs, gan_lat_u = get_ganancia_latente()
+                m += f"\n📦 Inventario: `{inv['cantidad']:.4f} USDT` | CPP: `{inv['cpp_bs']:.2f} Bs`\n"
+                if gan_lat_u > 0:
+                    m += f"📈 Ganancia latente: `{gan_lat_u:.4f} USDT`\n"
             m += "_Saldos actualizados_"
             return m
         del conversaciones[chat_id]; return "❌ Operación cancelada."
@@ -2431,6 +2497,14 @@ def procesar(chat_id, texto):
     # ── CAPITAL ──
     elif cmd=='/capital':
         send(chat_id, msg_capital())
+        ocioso = calcular_capital_ocioso()
+        if ocioso['pct_ocioso'] > 30:
+            m_oc = f"\n💤 *CAPITAL OCIOSO: `{ocioso['pct_ocioso']:.0f}%`*\n"
+            m_oc += f"`{ocioso['capital_ocioso']:.2f} USDT` sin mover hoy\n"
+            if ocioso['pct_ocioso'] > 60:
+                m_oc += "⚠️ Más del 60% inactivo — considera operar más\n"
+            m_oc += "_/kpi para análisis completo_"
+            send(chat_id, m_oc)
 
     # ── UMBRAL ──
     elif cmd=='/umbral':
@@ -2464,8 +2538,9 @@ def procesar(chat_id, texto):
     elif cmd=='/clientes':
         sub = partes[1].lower() if len(partes)>1 else 'top'
         if sub == 'top': send(chat_id, msg_clientes_top())
+        elif sub == 'rentabilidad': send(chat_id, msg_clientes_top_rentabilidad())
         elif sub == 'riesgo': send(chat_id, msg_clientes_riesgo())
-        else: send(chat_id, "Uso: `/clientes top` | `/clientes riesgo`")
+        else: send(chat_id, "Uso: `/clientes top` | `/clientes rentabilidad` | `/clientes riesgo`")
 
     elif cmd=='/oportunidades':
         dias = int(partes[1]) if len(partes) > 1 and partes[1].isdigit() else 7
@@ -2483,6 +2558,117 @@ def procesar(chat_id, texto):
     elif cmd=='/mianuncio':
         send(chat_id, "⏳ Buscando tu anuncio en Binance...")
         send(chat_id, msg_estado_anuncio_gsa())
+
+    # ── INVENTARIO ──
+    elif cmd=='/inventario':
+        inv = get_inventario()
+        gan_lat_bs, gan_lat_u = get_ganancia_latente()
+        t = get_ultima_tasa()
+        precio_actual = t.get('ban_bs_venta', 0) or 0
+        m = f"📦 *INVENTARIO USDT*\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        if inv['cantidad'] > 0:
+            m += f"Cantidad: `{inv['cantidad']:.4f} USDT`\n"
+            m += f"CPP: `{inv['cpp_bs']:.2f} Bs` por USDT\n"
+            m += f"Costo total: `{inv['cantidad'] * inv['cpp_bs']:,.2f} Bs`\n\n"
+            if precio_actual:
+                m += f"Precio mercado actual: `{precio_actual:.2f} Bs`\n"
+                if gan_lat_u > 0:
+                    m += f"📈 Ganancia latente: `{gan_lat_bs:,.2f} Bs` (`{gan_lat_u:.4f} USDT`)\n"
+                elif gan_lat_u < 0:
+                    m += f"📉 Pérdida latente: `{abs(gan_lat_bs):,.2f} Bs` (`{abs(gan_lat_u):.4f} USDT`)\n"
+                else:
+                    m += f"⚪ Sin ganancia latente aún\n"
+        else:
+            m += f"Sin inventario USDT actualmente\n"
+            m += f"_Las compras en Binance se registran aquí_"
+        send(chat_id, m)
+
+    # ── LEDGER v7 ──
+    elif cmd=='/cierredia':
+        sub = partes[1].lower() if len(partes) > 1 else ''
+        forzar = sub == 'forzar'
+        send(chat_id, "⏳ Ejecutando cierre diario...")
+        ok, msg = ejecutar_cierre_diario(usuario=str(chat_id), forzar=forzar)
+        send(chat_id, msg)
+
+    elif cmd=='/traslado':
+        if len(partes) >= 4:
+            try:
+                origen = partes[1].upper()
+                destino = partes[2].upper()
+                monto = float(partes[3].replace(',','.'))
+                desc = ' '.join(partes[4:]) if len(partes) > 4 else f"Traslado {origen} a {destino}"
+                if origen not in NOMBRES_CUENTAS or destino not in NOMBRES_CUENTAS:
+                    send(chat_id, "Cuenta no valida."); return
+                lid = registrar_traslado(origen, destino, monto, desc, str(chat_id))
+                send(chat_id, f"✅ *Traslado registrado*\n`{NOMBRES_CUENTAS[origen]}` → `{NOMBRES_CUENTAS[destino]}`\nMonto: `{monto:,.2f}`\nLedger ID: `{lid}`")
+            except Exception as e:
+                send(chat_id, f"Uso: /traslado ORIGEN DESTINO MONTO descripcion\nError: {e}")
+        else:
+            send(chat_id, "Uso: /traslado BS_BANESCO BS_MERCANTIL 50000 descripcion")
+
+    elif cmd=='/ajuste':
+        if len(partes) >= 4:
+            try:
+                cuenta = partes[1].upper()
+                monto = float(partes[2].replace(',','.'))
+                motivo = ' '.join(partes[3:])
+                if cuenta not in NOMBRES_CUENTAS:
+                    send(chat_id, "Cuenta no valida."); return
+                conn = get_conn()
+                saldo_ant = conn.execute("SELECT saldo FROM saldos WHERE cuenta=?", (cuenta,)).fetchone()
+                saldo_anterior = saldo_ant['saldo'] if saldo_ant else 0
+                conn.execute("UPDATE saldos SET saldo=saldo+?,ultima_actualizacion=CURRENT_TIMESTAMP WHERE cuenta=?", (monto, cuenta))
+                conn.commit(); conn.close()
+                moneda = get_moneda(cuenta)
+                lid = ledger_insert('AJUSTE_AUDITADO', cuenta if monto>0 else 'DIFERENCIAS',
+                    'DIFERENCIAS' if monto>0 else cuenta, moneda, abs(monto),
+                    descripcion=f"Ajuste: {motivo} (anterior: {saldo_anterior:,.2f})", usuario=str(chat_id))
+                send(chat_id, f"✅ *Ajuste registrado*\n`{NOMBRES_CUENTAS[cuenta]}`: `{monto:+,.2f}`\nMotivo: _{motivo}_\nLedger ID: `{lid}`")
+            except Exception as e:
+                send(chat_id, f"Uso: /ajuste BS_BANESCO -500 Fee blockchain\nError: {e}")
+        else:
+            send(chat_id, "Uso: /ajuste CUENTA MONTO motivo obligatorio")
+
+    elif cmd=='/reconstruir':
+        if len(partes) >= 2:
+            try:
+                import datetime as dt2
+                fecha_iso = dt2.datetime.strptime(partes[1], '%d/%m/%Y').strftime('%Y-%m-%d')
+                send(chat_id, reconstruir_dia(fecha_iso))
+            except:
+                send(chat_id, "Uso: /reconstruir 08/06/2026")
+        else:
+            send(chat_id, "Uso: /reconstruir DD/MM/YYYY")
+
+    elif cmd=='/patrimonio':
+        if len(partes) >= 2 and partes[1].lower() == 'inicial':
+            saldos_actuales = get_saldos()
+            registrar_patrimonio_inicial(saldos_actuales)
+            send(chat_id, f"✅ *Patrimonio inicial registrado*\nFecha: `{today_local()}`")
+        else:
+            conn2 = get_conn()
+            rows2 = conn2.execute(
+                "SELECT cuenta, moneda, saldo FROM patrimonio_inicial ORDER BY cuenta"
+            ).fetchall()
+            conn2.close()
+            if not rows2:
+                send(chat_id, "Sin patrimonio inicial.\nUsa `/patrimonio inicial` para registrar.")
+            else:
+                m2 = "🏛️ *PATRIMONIO INICIAL*\n\n"
+                for r2 in rows2:
+                    nombre2 = NOMBRES_CUENTAS.get(r2['cuenta'], r2['cuenta'])
+                    m2 += f"`{nombre2}`: `{r2['saldo']:,.2f} {r2['moneda']}`\n"
+                send(chat_id, m2)
+
+    # ── KPIs ──
+    elif cmd=='/kpi':
+        send(chat_id, "⏳ Calculando KPIs...")
+        send(chat_id, msg_kpi())
+
+    elif cmd=='/profundidad':
+        send(chat_id, "⏳ Analizando profundidad del mercado...")
+        send(chat_id, msg_profundidad_mercado())
 
     # ── META DIARIA ──
     elif cmd=='/meta':
@@ -2643,7 +2829,11 @@ def procesar(chat_id, texto):
 /capital | /umbral CUENTA MONTO
 
 *💱 OPERACIONES*
-/op (operación rápida) | /operaciones | /ultima
+/op (operación rápida) | /operaciones | /ultima\n\n*📒 LEDGER v7*\n/cierredia | /traslado | /ajuste\n/reconstruir DD/MM/YYYY | /patrimonio
+
+*📊 KPIs*
+/kpi | /inventario | /profundidad
+/clientes rentabilidad
 
 *📡 ANUNCIO*
 /mianuncio
@@ -3384,6 +3574,906 @@ def msg_estado_anuncio_gsa():
     return m
 
 
+
+# ══════════════════════════════════════════════════════════════════════
+# INVENTARIO USDT CON CPP PROMEDIO PONDERADO
+# ══════════════════════════════════════════════════════════════════════
+
+def init_inventario():
+    """Crea tabla de inventario si no existe."""
+    conn = get_conn()
+    conn.execute("""CREATE TABLE IF NOT EXISTS inventario_usdt (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cantidad REAL DEFAULT 0,
+        cpp_bs REAL DEFAULT 0,
+        ultima_compra_precio REAL DEFAULT 0,
+        ultima_actualizacion DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    # Insertar registro inicial si no existe
+    row = conn.execute("SELECT id FROM inventario_usdt LIMIT 1").fetchone()
+    if not row:
+        conn.execute("INSERT INTO inventario_usdt (cantidad, cpp_bs) VALUES (0, 0)")
+    conn.commit()
+    conn.close()
+
+def get_inventario():
+    """Retorna el inventario actual de USDT."""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM inventario_usdt ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    if row:
+        return {'cantidad': row['cantidad'] or 0, 'cpp_bs': row['cpp_bs'] or 0,
+                'ultima_compra': row['ultima_compra_precio'] or 0}
+    return {'cantidad': 0, 'cpp_bs': 0, 'ultima_compra': 0}
+
+def actualizar_inventario_compra(usdt_comprado, precio_compra_bs):
+    """Actualiza inventario cuando se compra USDT. Recalcula CPP."""
+    inv = get_inventario()
+    cantidad_ant = inv['cantidad']
+    cpp_ant = inv['cpp_bs']
+
+    # Recalcular CPP promedio ponderado
+    total_bs_ant = cantidad_ant * cpp_ant
+    total_bs_nuevo = usdt_comprado * precio_compra_bs
+    nueva_cantidad = cantidad_ant + usdt_comprado
+    nuevo_cpp = (total_bs_ant + total_bs_nuevo) / nueva_cantidad if nueva_cantidad > 0 else precio_compra_bs
+
+    conn = get_conn()
+    conn.execute("""UPDATE inventario_usdt SET
+        cantidad=?, cpp_bs=?, ultima_compra_precio=?,
+        ultima_actualizacion=CURRENT_TIMESTAMP""",
+        (round(nueva_cantidad, 4), round(nuevo_cpp, 4), precio_compra_bs))
+    conn.commit()
+    conn.close()
+
+    # Registrar en Supabase
+    if USE_SUPABASE:
+        supa_insert('inventario_usdt', {
+            'cantidad': round(nueva_cantidad, 4),
+            'cpp_bs': round(nuevo_cpp, 4),
+            'ultima_compra_precio': precio_compra_bs,
+        })
+
+    return {'cantidad': nueva_cantidad, 'cpp_bs': nuevo_cpp}
+
+def consumir_inventario(usdt_requerido, precio_venta_bs):
+    """
+    Consume inventario para una operación.
+    Si hay suficiente: usa CPP del inventario.
+    Si no hay suficiente: usa existencia + compra el resto al precio actual.
+    Retorna desglose de ganancia financiera.
+    """
+    inv = get_inventario()
+    disponible = inv['cantidad']
+    cpp = inv['cpp_bs']
+
+    resultado = {
+        'usdt_de_inventario': 0,
+        'usdt_comprado_ahora': 0,
+        'cpp_inventario': cpp,
+        'precio_compra_ahora': precio_venta_bs,  # precio actual si hay que comprar
+        'ganancia_financiera_bs': 0,
+        'ganancia_financiera_usdt': 0,
+        'cpp_efectivo': 0,
+        'inventario_restante': 0,
+    }
+
+    if disponible >= usdt_requerido:
+        # CASO A — Inventario suficiente
+        resultado['usdt_de_inventario'] = usdt_requerido
+        resultado['usdt_comprado_ahora'] = 0
+        resultado['ganancia_financiera_bs'] = (precio_venta_bs - cpp) * usdt_requerido
+        resultado['ganancia_financiera_usdt'] = resultado['ganancia_financiera_bs'] / precio_venta_bs if precio_venta_bs else 0
+        resultado['cpp_efectivo'] = cpp
+        nueva_cantidad = disponible - usdt_requerido
+
+    elif disponible > 0:
+        # CASO B — Inventario parcial
+        faltante = usdt_requerido - disponible
+        precio_actual = precio_venta_bs  # compra al precio actual del mercado
+
+        resultado['usdt_de_inventario'] = disponible
+        resultado['usdt_comprado_ahora'] = faltante
+        resultado['precio_compra_ahora'] = precio_actual
+
+        # Ganancia solo sobre lo que venía del inventario
+        resultado['ganancia_financiera_bs'] = (precio_venta_bs - cpp) * disponible
+        resultado['ganancia_financiera_usdt'] = resultado['ganancia_financiera_bs'] / precio_venta_bs if precio_venta_bs else 0
+
+        # CPP efectivo ponderado
+        total_bs = (disponible * cpp) + (faltante * precio_actual)
+        resultado['cpp_efectivo'] = total_bs / usdt_requerido if usdt_requerido > 0 else precio_actual
+        nueva_cantidad = 0
+
+    else:
+        # CASO C — Sin inventario
+        resultado['usdt_de_inventario'] = 0
+        resultado['usdt_comprado_ahora'] = usdt_requerido
+        resultado['precio_compra_ahora'] = precio_venta_bs
+        resultado['ganancia_financiera_bs'] = 0
+        resultado['ganancia_financiera_usdt'] = 0
+        resultado['cpp_efectivo'] = precio_venta_bs
+        nueva_cantidad = 0
+
+    # Actualizar inventario
+    conn = get_conn()
+    conn.execute("""UPDATE inventario_usdt SET
+        cantidad=?, ultima_actualizacion=CURRENT_TIMESTAMP""",
+        (round(max(0, nueva_cantidad), 4),))
+    conn.commit()
+    conn.close()
+
+    resultado['inventario_restante'] = round(max(0, nueva_cantidad), 4)
+    return resultado
+
+def msg_inventario_op(resultado_consumo, usdt_requerido, precio_venta_bs):
+    """Genera mensaje de desglose de inventario para una operación."""
+    m = ""
+    caso = ""
+
+    if resultado_consumo['usdt_comprado_ahora'] == 0:
+        caso = "A"
+        m += f"📦 *Inventario suficiente*\n"
+        m += f"  {usdt_requerido:.4f} USDT del inventario\n"
+        m += f"  CPP: `{resultado_consumo['cpp_inventario']:.2f} Bs`\n"
+    elif resultado_consumo['usdt_de_inventario'] > 0:
+        caso = "B"
+        m += f"📦 *Inventario parcial*\n"
+        m += f"  {resultado_consumo['usdt_de_inventario']:.4f} USDT del inventario (CPP `{resultado_consumo['cpp_inventario']:.2f} Bs`)\n"
+        m += f"  {resultado_consumo['usdt_comprado_ahora']:.4f} USDT al precio actual (`{resultado_consumo['precio_compra_ahora']:.2f} Bs`)\n"
+    else:
+        caso = "C"
+        m += f"📦 *Sin inventario — compra al precio actual*\n"
+        m += f"  {usdt_requerido:.4f} USDT a `{resultado_consumo['precio_compra_ahora']:.2f} Bs`\n"
+
+    if resultado_consumo['ganancia_financiera_bs'] > 0:
+        m += f"\n💰 Ganancia financiera: `{resultado_consumo['ganancia_financiera_bs']:.2f} Bs` (`{resultado_consumo['ganancia_financiera_usdt']:.4f} USDT`)\n"
+    elif caso == "C":
+        m += f"\n⚪ Sin ganancia financiera (sin inventario previo)\n"
+
+    m += f"📊 Inventario restante: `{resultado_consumo['inventario_restante']:.4f} USDT`"
+    return m
+
+def calcular_ganancia_comercial(tipo_op, monto_entrada, tasa_cliente, t):
+    """Calcula la ganancia comercial (margen sobre tasa límite)."""
+    limite = None
+    if tipo_op in ('CLP→BS', 'BS→CLP'):
+        limite = t.get('limite_clp_bs', 0) or 0
+    elif tipo_op in ('CLP→COP', 'COP→CLP'):
+        limite = t.get('limite_clp_cop', 0) or 0
+    elif tipo_op in ('COP→BS', 'BS→COP'):
+        limite = t.get('limite_bs_cop', 0) or 0
+
+    if not limite or not tasa_cliente: return 0
+
+    dol_obs = t.get('dolar_obs', 1) or 1
+    usdt_equiv = monto_entrada / dol_obs if 'CLP' in tipo_op else monto_entrada / (t.get('ban_bs_compra',1) or 1)
+
+    margen = abs(tasa_cliente - limite) / limite if limite else 0
+    return round(usdt_equiv * margen, 4)
+
+def get_ganancia_latente():
+    """Calcula la ganancia latente del inventario actual."""
+    inv = get_inventario()
+    if inv['cantidad'] <= 0 or inv['cpp_bs'] <= 0:
+        return 0, 0
+
+    t = get_ultima_tasa()
+    precio_actual = (t.get('ban_bs_venta', 0) or 0)
+    if not precio_actual: return 0, 0
+
+    ganancia_bs = (precio_actual - inv['cpp_bs']) * inv['cantidad']
+    ganancia_usdt = ganancia_bs / precio_actual if precio_actual else 0
+    return round(ganancia_bs, 2), round(ganancia_usdt, 4)
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+# KPIs — ROIC, CAPITAL OCIOSO, RENTABILIDAD POR CLIENTE
+# ══════════════════════════════════════════════════════════════════════
+
+def calcular_roic_diario():
+    """Calcula el ROIC diario (ganancia / capital invertido)."""
+    # Ganancia del día
+    res = get_resultados_hoy()
+    ganancia_hoy = res.get('ganancia_neta', 0) or 0
+
+    # Capital total en USDT
+    saldos = get_saldos()
+    t = get_ultima_tasa()
+    pat_bs  = ((t.get('ban_bs_compra',0) or 0)+(t.get('ban_bs_venta',0) or 0))/2 or 1
+    dol_obs = t.get('dolar_obs',1) or 1
+    trm     = t.get('trm',1) or 1
+
+    capital_total = 0
+    for cuenta, info in saldos.items():
+        saldo = info.get('saldo', 0) or 0
+        moneda = info.get('moneda', '') or ''
+        capital_total += calcular_usdt_equiv(moneda, saldo, pat_bs, dol_obs)
+
+    roic = (ganancia_hoy / capital_total * 100) if capital_total > 0 else 0
+    return {
+        'ganancia_hoy': ganancia_hoy,
+        'capital_total': capital_total,
+        'roic_diario': round(roic, 4),
+        'roic_anualizado': round(roic * 365, 2),
+    }
+
+def calcular_capital_ocioso():
+    """Detecta capital que no está siendo utilizado."""
+    saldos = get_saldos()
+    t = get_ultima_tasa()
+    pat_bs  = ((t.get('ban_bs_compra',0) or 0)+(t.get('ban_bs_venta',0) or 0))/2 or 1
+    dol_obs = t.get('dolar_obs',1) or 1
+
+    # Capital total
+    capital_total_usdt = 0
+    for cuenta, info in saldos.items():
+        saldo = info.get('saldo', 0) or 0
+        moneda = info.get('moneda', '') or ''
+        capital_total_usdt += calcular_usdt_equiv(moneda, saldo, pat_bs, dol_obs)
+
+    # Capital activo hoy (en operaciones del día)
+    conn = get_conn()
+    hoy = str(today_local())
+    vol_hoy = conn.execute("""
+        SELECT COALESCE(SUM(usdt_equiv),0) as vol
+        FROM operaciones WHERE fecha=? AND estado='Completada'
+    """, (hoy,)).fetchone()['vol'] or 0
+    conn.close()
+
+    # Inventario activo
+    inv = get_inventario()
+    capital_inventario = (inv['cantidad'] * inv['cpp_bs'] / pat_bs) if pat_bs else 0
+
+    capital_activo = vol_hoy + capital_inventario
+    capital_ocioso = max(0, capital_total_usdt - capital_activo)
+    pct_ocioso = (capital_ocioso / capital_total_usdt * 100) if capital_total_usdt > 0 else 0
+
+    return {
+        'capital_total': round(capital_total_usdt, 4),
+        'capital_activo': round(capital_activo, 4),
+        'capital_ocioso': round(capital_ocioso, 4),
+        'pct_ocioso': round(pct_ocioso, 1),
+        'vol_hoy': round(vol_hoy, 4),
+        'capital_inventario': round(capital_inventario, 4),
+    }
+
+def msg_kpi():
+    """Dashboard de KPIs del negocio."""
+    roic = calcular_roic_diario()
+    ocioso = calcular_capital_ocioso()
+    inv = get_inventario()
+    gan_lat_bs, gan_lat_u = get_ganancia_latente()
+    res_mes = get_resultados_mes()
+    ahora = now_local().strftime("%d/%m %I:%M %p")
+
+    m = f"📊 *KPIs GSA CAMBIOS*\n📅 {ahora}\n━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    # ROIC
+    m += f"🎯 *RETORNO SOBRE CAPITAL (ROIC)*\n"
+    if roic['roic_diario'] > 0:
+        emoji_r = "🚀" if roic['roic_diario'] > 1 else "🟢" if roic['roic_diario'] > 0.5 else "🟡"
+    else:
+        emoji_r = "🔴"
+    m += f"  Ganancia hoy: `{roic['ganancia_hoy']:.4f} USDT`\n"
+    m += f"  Capital total: `{roic['capital_total']:.2f} USDT`\n"
+    m += f"  ROIC diario: `{roic['roic_diario']:.4f}%` {emoji_r}\n"
+    m += f"  ROIC anualizado: `{roic['roic_anualizado']:.2f}%`\n\n"
+
+    # Capital ocioso
+    m += f"💤 *CAPITAL OCIOSO*\n"
+    emoji_o = "🔴" if ocioso['pct_ocioso'] > 60 else "🟡" if ocioso['pct_ocioso'] > 30 else "🟢"
+    m += f"  Capital total: `{ocioso['capital_total']:.2f} USDT`\n"
+    m += f"  Activo hoy: `{ocioso['capital_activo']:.2f} USDT`\n"
+    m += f"  Ocioso: `{ocioso['capital_ocioso']:.2f} USDT` (`{ocioso['pct_ocioso']:.0f}%`) {emoji_o}\n"
+    if ocioso['pct_ocioso'] > 50:
+        m += f"  ⚠️ Más del 50% del capital sin mover\n"
+    m += "\n"
+
+    # Inventario y ganancia latente
+    m += f"📦 *INVENTARIO USDT*\n"
+    if inv['cantidad'] > 0:
+        m += f"  Cantidad: `{inv['cantidad']:.4f} USDT` | CPP: `{inv['cpp_bs']:.2f} Bs`\n"
+        if gan_lat_u != 0:
+            emoji_g = "📈" if gan_lat_u > 0 else "📉"
+            m += f"  {emoji_g} Ganancia latente: `{gan_lat_u:.4f} USDT`\n"
+    else:
+        m += f"  Sin inventario actualmente\n"
+    m += "\n"
+
+    # P&L del mes
+    m += f"📆 *P&L DEL MES*\n"
+    m += f"  Ops: `{res_mes['ops']}` | Vol: `{res_mes['volumen']:.4f} USDT`\n"
+    m += f"  Ganancia neta: `{res_mes['ganancia_neta']:.4f} USDT`\n"
+    if res_mes['ops'] > 0:
+        gan_por_op = res_mes['ganancia_neta'] / res_mes['ops']
+        m += f"  Ganancia/op: `{gan_por_op:.4f} USDT`\n"
+
+    return m
+
+def msg_clientes_top_rentabilidad():
+    """Top clientes por ganancia generada, no solo volumen."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT nombre, operaciones_total, volumen_usdt, ganancia_generada
+        FROM clientes
+        ORDER BY ganancia_generada DESC LIMIT 10
+    """).fetchall()
+    conn.close()
+
+    if not rows:
+        return "Sin clientes registrados aún."
+
+    m = "🏆 *TOP CLIENTES POR RENTABILIDAD*\n━━━━━━━━━━━━━━━━━━━━\n\n"
+    for i, r in enumerate(rows, 1):
+        vol = r['volumen_usdt'] or 0
+        gan = r['ganancia_generada'] or 0
+        roi_cli = (gan / vol * 100) if vol > 0 else 0
+        emoji = "🥇" if i==1 else "🥈" if i==2 else "🥉" if i==3 else f"{i}."
+        m += f"{emoji} `{r['nombre']}`\n"
+        m += f"   Ops: `{r['operaciones_total']}` | Vol: `{vol:.2f} USDT`\n"
+        m += f"   Ganancia: `{gan:.4f} USDT` | ROI: `{roi_cli:.2f}%`\n\n"
+    return m
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PROFUNDIDAD REAL DE MERCADO BINANCE
+# ══════════════════════════════════════════════════════════════════════
+
+def get_profundidad_bs(side, montos=[100, 250, 500, 1000, 2000]):
+    """Calcula el precio promedio ponderado para diferentes montos en USDT."""
+    url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+    headers = {"Content-Type": "application/json"}
+    pay = ["Banesco", "Mercantil"] if side == "SELL" else ["Banesco", "Mercantil", "PagoMovil"]
+
+    try:
+        r = requests.post(url, headers=headers, json={
+            "asset": "USDT", "fiat": "VES", "merchantCheck": False,
+            "page": 1, "publisherType": None, "rows": 20,
+            "tradeType": side, "payTypes": pay
+        }, timeout=10)
+        ads = r.json().get("data", [])
+    except: return {}
+
+    # Construir libro de órdenes
+    libro = []
+    for a in ads:
+        adv = a.get("adv", {})
+        disponible = float(adv.get("surplusAmount", 0))
+        precio = float(adv.get("price", 0))
+        if disponible > 0 and precio > 0:
+            libro.append({'precio': precio, 'disponible': disponible})
+
+    # Calcular precio promedio ponderado para cada monto
+    resultado = {}
+    for monto in montos:
+        restante = monto
+        costo_total = 0
+        cubierto = 0
+        for orden in libro:
+            if restante <= 0: break
+            tomar = min(restante, orden['disponible'])
+            costo_total += tomar * orden['precio']
+            cubierto += tomar
+            restante -= tomar
+        if cubierto >= monto * 0.95:  # Al menos 95% cubierto
+            resultado[monto] = round(costo_total / cubierto, 2)
+        else:
+            resultado[monto] = None  # No hay suficiente liquidez
+    return resultado
+
+def msg_profundidad_mercado():
+    """Muestra la profundidad real del mercado BS para diferentes montos."""
+    ahora = now_local().strftime("%d/%m %I:%M %p")
+    m = f"📊 *PROFUNDIDAD MERCADO BS*\n📅 {ahora}\n━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    compra = get_profundidad_bs("SELL")  # Tú compras USDT pagando Bs
+    venta  = get_profundidad_bs("BUY")   # Tú vendes USDT recibiendo Bs
+
+    montos = [100, 250, 500, 1000, 2000]
+
+    m += "📥 *Precio real si COMPRAS X USDT:*\n"
+    m += "`Monto    Precio/USDT  Spread real`\n"
+    for monto in montos:
+        pc = compra.get(monto)
+        pv = venta.get(monto)
+        if pc and pv:
+            spread = pv - pc
+            emoji = "🟢" if spread >= 10 else "🟡" if spread >= 5 else "🔴"
+            m += f"`{monto:5d} USDT  {pc:,.2f} Bs   {spread:.2f} Bs {emoji}`\n"
+        elif pc:
+            m += f"`{monto:5d} USDT  {pc:,.2f} Bs   S/D`\n"
+        else:
+            m += f"`{monto:5d} USDT  Sin liquidez`\n"
+
+    m += "\n📤 *Precio real si VENDES X USDT:*\n"
+    for monto in montos:
+        pv = venta.get(monto)
+        if pv:
+            m += f"`{monto:5d} USDT  {pv:,.2f} Bs`\n"
+        else:
+            m += f"`{monto:5d} USDT  Sin liquidez`\n"
+
+    m += "\n_Precios promedio ponderados por volumen real_"
+    return m
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+# LEDGER — LIBRO MAYOR FINANCIERO v7
+# ══════════════════════════════════════════════════════════════════════
+
+TIPOS_MOVIMIENTO = [
+    'OPERACION_CLIENTE',   # operación con cliente
+    'ARBITRAJE_BINANCE',   # compra/venta en Binance
+    'TRASLADO_INTERNO',    # entre cuentas propias
+    'DEPOSITO_CAPITAL',    # inyección de capital propio
+    'RETIRO_PROPIETARIO',  # retiro personal
+    'GASTO_OPERATIVO',     # fee, delivery, suscripción
+    'CORRESPONSAL_PAGO',   # pago a corresponsal
+    'AJUSTE_AUDITADO',     # corrección con motivo
+    'CONCILIACION',        # diferencia de conciliación
+    'CIERRE_DIARIO',       # snapshot fin de día
+    'PATRIMONIO_INICIAL',  # punto de partida
+]
+
+CUENTAS_ACTIVO = [
+    'BS_BANESCO', 'BS_MERCANTIL',
+    'CLP_COPEC_PAY', 'CLP_BANCOESTADO',
+    'COP_EFECTIVO_ORLANDO', 'COP_BANCOLOMBIA_C1',
+    'COP_BANCOLOMBIA_C2', 'COP_NEQUI_C1',
+    'COP_NEQUI_C2', 'COP_NEQUI_C3',
+    'USD_EFECTIVO', 'USDT_BINANCE', 'USDC_AIRTM',
+]
+CUENTAS_PASIVO = ['CXP_CORRESPONSALES', 'CXP_CLIENTES']
+CUENTAS_PATRIMONIO = ['CAPITAL_LENDYS', 'UTILIDADES_RETENIDAS', 'RETIROS_PROPIETARIO']
+CUENTAS_INGRESO = ['SPREAD_BS', 'COMISION_CAMBIO', 'COMISION_REFERIDO']
+CUENTAS_GASTO = [
+    'FEE_BINANCE', 'FEE_BANCARIO', 'DELIVERY_ENCOMIENDA',
+    'SUSCRIPCIONES', 'TELEFONIA', 'FEE_RETIRO_CUCUTA',
+    'GASTOS_OPERATIVOS',
+]
+CUENTAS_SISTEMA = ['APERTURA', 'DIFERENCIAS']
+
+def init_ledger():
+    """Crea tablas del ledger si no existen."""
+    conn = get_conn()
+
+    # Tabla principal del ledger
+    conn.execute("""CREATE TABLE IF NOT EXISTS ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha DATE NOT NULL,
+        hora TIME NOT NULL,
+        tipo_movimiento TEXT NOT NULL,
+        cuenta_debe TEXT NOT NULL,
+        cuenta_haber TEXT NOT NULL,
+        moneda TEXT NOT NULL,
+        monto REAL NOT NULL,
+        monto_usdt REAL DEFAULT 0,
+        tasa_conversion REAL DEFAULT 1,
+        referencia_id INTEGER DEFAULT 0,
+        referencia_tipo TEXT DEFAULT '',
+        descripcion TEXT,
+        usuario TEXT,
+        fecha_registro DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # Tabla de patrimonio inicial
+    conn.execute("""CREATE TABLE IF NOT EXISTS patrimonio_inicial (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha_corte DATE NOT NULL,
+        cuenta TEXT NOT NULL,
+        moneda TEXT NOT NULL,
+        saldo REAL NOT NULL,
+        saldo_usdt REAL DEFAULT 0,
+        tasa_conversion REAL DEFAULT 1,
+        descripcion TEXT,
+        fecha_registro DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # Tabla de cierres diarios
+    conn.execute("""CREATE TABLE IF NOT EXISTS cierres_diarios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha DATE UNIQUE NOT NULL,
+        estado TEXT DEFAULT 'PENDIENTE',
+        patrimonio_usdt REAL DEFAULT 0,
+        ganancia_comercial_usdt REAL DEFAULT 0,
+        ganancia_financiera_usdt REAL DEFAULT 0,
+        ganancia_total_usdt REAL DEFAULT 0,
+        gastos_usdt REAL DEFAULT 0,
+        utilidad_neta_usdt REAL DEFAULT 0,
+        cxc_total REAL DEFAULT 0,
+        cxp_total REAL DEFAULT 0,
+        inventario_usdt REAL DEFAULT 0,
+        cpp_bs REAL DEFAULT 0,
+        saldos_json TEXT DEFAULT '{}',
+        tasas_cierre_json TEXT DEFAULT '{}',
+        ops_total INTEGER DEFAULT 0,
+        volumen_usdt REAL DEFAULT 0,
+        usuario_cierre TEXT DEFAULT 'sistema',
+        fecha_cierre DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # Tabla de costos por operación
+    conn.execute("""CREATE TABLE IF NOT EXISTS costos_operacion (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        op_id INTEGER NOT NULL,
+        tipo_costo TEXT NOT NULL,
+        descripcion TEXT,
+        monto REAL NOT NULL,
+        moneda TEXT NOT NULL,
+        monto_usdt REAL DEFAULT 0,
+        fecha DATE DEFAULT CURRENT_DATE,
+        fecha_registro DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # Tabla de traslados internos
+    conn.execute("""CREATE TABLE IF NOT EXISTS traslados (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha DATE DEFAULT CURRENT_DATE,
+        hora TIME,
+        cuenta_origen TEXT NOT NULL,
+        cuenta_destino TEXT NOT NULL,
+        moneda TEXT NOT NULL,
+        monto REAL NOT NULL,
+        monto_usdt REAL DEFAULT 0,
+        descripcion TEXT,
+        usuario TEXT,
+        fecha_registro DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    conn.commit()
+    conn.close()
+    print("✅ Ledger v7 inicializado")
+
+def ledger_insert(tipo, cuenta_debe, cuenta_haber, moneda, monto,
+                  tasa=1, ref_id=0, ref_tipo='', descripcion='', usuario='sistema'):
+    """Inserta un movimiento en el ledger."""
+    ahora = now_local()
+    monto_usdt = calcular_usdt_equiv(moneda, monto, 0, 0)
+    conn = get_conn()
+    conn.execute("""INSERT INTO ledger
+        (fecha, hora, tipo_movimiento, cuenta_debe, cuenta_haber,
+         moneda, monto, monto_usdt, tasa_conversion,
+         referencia_id, referencia_tipo, descripcion, usuario)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (str(ahora.date()), ahora.strftime("%H:%M"), tipo,
+         cuenta_debe, cuenta_haber, moneda, monto, monto_usdt,
+         tasa, ref_id, ref_tipo, descripcion, usuario))
+    lid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit(); conn.close()
+
+    if USE_SUPABASE:
+        supa_insert('ledger', {
+            'fecha': str(ahora.date()), 'hora': ahora.strftime("%H:%M"),
+            'tipo_movimiento': tipo, 'cuenta_debe': cuenta_debe,
+            'cuenta_haber': cuenta_haber, 'moneda': moneda,
+            'monto': monto, 'monto_usdt': monto_usdt,
+            'tasa_conversion': tasa, 'referencia_id': ref_id,
+            'referencia_tipo': ref_tipo, 'descripcion': descripcion,
+            'usuario': usuario,
+        })
+    return lid
+
+def registrar_patrimonio_inicial(saldos_dict):
+    """Registra el patrimonio inicial como punto de partida del ledger."""
+    conn = get_conn()
+    fecha_corte = str(today_local())
+    t = get_ultima_tasa()
+    pat_bs = ((t.get('ban_bs_compra',0) or 0)+(t.get('ban_bs_venta',0) or 0))/2 or 1
+    dol_obs = t.get('dolar_obs',1) or 1
+
+    for cuenta, datos in saldos_dict.items():
+        saldo = datos.get('saldo', 0) or 0
+        moneda = datos.get('moneda', '') or ''
+        if saldo == 0: continue
+
+        tasa = pat_bs if moneda == 'BS' else dol_obs if moneda == 'CLP' else 1
+        saldo_usdt = calcular_usdt_equiv(moneda, saldo, pat_bs, dol_obs)
+
+        conn.execute("""INSERT INTO patrimonio_inicial
+            (fecha_corte, cuenta, moneda, saldo, saldo_usdt, tasa_conversion, descripcion)
+            VALUES (?,?,?,?,?,?,?)""",
+            (fecha_corte, cuenta, moneda, saldo, saldo_usdt, tasa,
+             f"Patrimonio inicial al {fecha_corte}"))
+
+        # También insertar en ledger como PATRIMONIO_INICIAL
+        ledger_insert(
+            tipo='PATRIMONIO_INICIAL',
+            cuenta_debe=cuenta,
+            cuenta_haber='CAPITAL_LENDYS',
+            moneda=moneda,
+            monto=saldo,
+            tasa=tasa,
+            descripcion=f"Saldo inicial {cuenta} al {fecha_corte}",
+        )
+
+    conn.commit(); conn.close()
+    print(f"✅ Patrimonio inicial registrado al {fecha_corte}")
+
+def registrar_traslado(cuenta_origen, cuenta_destino, monto, descripcion='', usuario='sistema'):
+    """Registra un traslado entre cuentas propias en el ledger."""
+    conn = get_conn()
+    moneda_origen = ''
+    for m in ['BS','CLP','COP','USD','USDT','USDC']:
+        if m in cuenta_origen: moneda_origen = m; break
+
+    t = get_ultima_tasa()
+    pat_bs = ((t.get('ban_bs_compra',0) or 0)+(t.get('ban_bs_venta',0) or 0))/2 or 1
+    dol_obs = t.get('dolar_obs',1) or 1
+    monto_usdt = calcular_usdt_equiv(moneda_origen, monto, pat_bs, dol_obs)
+
+    # Actualizar saldos
+    conn.execute("UPDATE saldos SET saldo=saldo-?,ultima_actualizacion=CURRENT_TIMESTAMP WHERE cuenta=?",
+                 (monto, cuenta_origen))
+    conn.execute("UPDATE saldos SET saldo=saldo+?,ultima_actualizacion=CURRENT_TIMESTAMP WHERE cuenta=?",
+                 (monto, cuenta_destino))
+
+    # Insertar traslado
+    ahora = now_local()
+    conn.execute("""INSERT INTO traslados
+        (fecha, hora, cuenta_origen, cuenta_destino, moneda, monto, monto_usdt, descripcion, usuario)
+        VALUES (?,?,?,?,?,?,?,?,?)""",
+        (str(ahora.date()), ahora.strftime("%H:%M"),
+         cuenta_origen, cuenta_destino, moneda_origen,
+         monto, monto_usdt, descripcion, usuario))
+    conn.commit(); conn.close()
+
+    # Insertar en ledger
+    lid = ledger_insert(
+        tipo='TRASLADO_INTERNO',
+        cuenta_debe=cuenta_destino,
+        cuenta_haber=cuenta_origen,
+        moneda=moneda_origen,
+        monto=monto,
+        descripcion=descripcion or f"Traslado {cuenta_origen}→{cuenta_destino}",
+        usuario=usuario,
+    )
+    return lid
+
+def registrar_costo_operacion(op_id, tipo_costo, descripcion, monto, moneda):
+    """Registra un costo asociado a una operación."""
+    t = get_ultima_tasa()
+    pat_bs = ((t.get('ban_bs_compra',0) or 0)+(t.get('ban_bs_venta',0) or 0))/2 or 1
+    dol_obs = t.get('dolar_obs',1) or 1
+    monto_usdt = calcular_usdt_equiv(moneda, monto, pat_bs, dol_obs)
+
+    conn = get_conn()
+    conn.execute("""INSERT INTO costos_operacion
+        (op_id, tipo_costo, descripcion, monto, moneda, monto_usdt)
+        VALUES (?,?,?,?,?,?)""",
+        (op_id, tipo_costo, descripcion, monto, moneda, monto_usdt))
+    conn.commit(); conn.close()
+
+    # Insertar en ledger
+    cuenta_gasto = {
+        'FEE_BINANCE': 'FEE_BINANCE',
+        'FEE_BANCARIO': 'FEE_BANCARIO',
+        'DELIVERY': 'DELIVERY_ENCOMIENDA',
+        'CORRESPONSAL': 'GASTOS_OPERATIVOS',
+        'FEE_RETIRO_CUCUTA': 'FEE_RETIRO_CUCUTA',
+    }.get(tipo_costo, 'GASTOS_OPERATIVOS')
+
+    ledger_insert(
+        tipo='GASTO_OPERATIVO',
+        cuenta_debe=cuenta_gasto,
+        cuenta_haber='USDT_BINANCE',
+        moneda=moneda,
+        monto=monto,
+        ref_id=op_id,
+        ref_tipo='operacion',
+        descripcion=descripcion,
+    )
+
+def calcular_costos_operacion(datos_op):
+    """Calcula todos los costos asociados a una operación."""
+    costos = []
+    usdt_equiv = datos_op.get('usdt_equiv', 0) or 0
+    tipo_op = datos_op.get('tipo_op', '')
+
+    # Fee Binance si es operación Binance
+    if tipo_op in ('BS→USDT', 'USDT→BS', 'CLP→USDT', 'USDT→CLP'):
+        fee_binance = usdt_equiv * 0.0002
+        if fee_binance > 0:
+            costos.append({
+                'tipo': 'FEE_BINANCE',
+                'descripcion': 'Fee Binance 0.02%',
+                'monto': round(fee_binance, 6),
+                'moneda': 'USDT',
+            })
+
+    # Comisión corresponsal 2.5%
+    if datos_op.get('corresponsal') and usdt_equiv > 0:
+        comision = usdt_equiv * 0.025
+        costos.append({
+            'tipo': 'CORRESPONSAL',
+            'descripcion': f"Comisión 2.5% → {datos_op['corresponsal']}",
+            'monto': round(comision, 4),
+            'moneda': 'USDT',
+        })
+
+    # Fee retiro Cúcuta
+    if datos_op.get('fee_retiro_cucuta', 0) > 0:
+        costos.append({
+            'tipo': 'FEE_RETIRO_CUCUTA',
+            'descripcion': 'Fee retiro efectivo Cúcuta (2,000 COP/millón)',
+            'monto': datos_op['fee_retiro_cucuta'],
+            'moneda': 'COP',
+        })
+
+    # Delivery/encomienda
+    if datos_op.get('encomienda_cop', 0) > 0:
+        costos.append({
+            'tipo': 'DELIVERY',
+            'descripcion': 'Costo encomienda/delivery',
+            'monto': datos_op['encomienda_cop'],
+            'moneda': 'COP',
+        })
+
+    return costos
+
+def ejecutar_cierre_diario(usuario='sistema', forzar=False):
+    """Ejecuta el cierre diario del sistema."""
+    conn = get_conn()
+    hoy = str(today_local())
+
+    # Verificar si ya existe cierre hoy
+    cierre_exist = conn.execute(
+        "SELECT id, estado FROM cierres_diarios WHERE fecha=?", (hoy,)
+    ).fetchone()
+
+    if cierre_exist and cierre_exist['estado'] == 'CERRADO' and not forzar:
+        conn.close()
+        return False, "Ya existe un cierre para hoy."
+
+    # Verificar C2C importado
+    c2c_hoy = conn.execute("""
+        SELECT COUNT(*) as cnt FROM operaciones
+        WHERE fecha=? AND metodo LIKE '%Binance%'
+    """, (hoy,)).fetchone()['cnt']
+
+    # Obtener datos del día
+    ops = conn.execute("""
+        SELECT COUNT(*) as cnt,
+               COALESCE(SUM(usdt_equiv),0) as vol,
+               COALESCE(SUM(gan_comercial_usdt),0) as gan_com,
+               COALESCE(SUM(gan_financiera_usdt),0) as gan_fin
+        FROM operaciones WHERE fecha=? AND estado='Completada'
+    """, (hoy,)).fetchone()
+
+    gastos = conn.execute("""
+        SELECT COALESCE(SUM(monto_usdt),0) as total
+        FROM costos_operacion WHERE fecha=?
+    """, (hoy,)).fetchone()['total'] or 0
+
+    cxc = conn.execute("""
+        SELECT COALESCE(SUM(usdt_equiv),0) as total
+        FROM cuentas_pendientes WHERE tipo='CXC' AND estado='Pendiente'
+    """).fetchone()['total'] or 0
+
+    cxp = conn.execute("""
+        SELECT COALESCE(SUM(usdt_equiv),0) as total
+        FROM cuentas_pendientes WHERE tipo='CXP' AND estado='Pendiente'
+    """).fetchone()['total'] or 0
+
+    # Calcular patrimonio actual
+    saldos = get_saldos()
+    t = get_ultima_tasa()
+    pat_bs = ((t.get('ban_bs_compra',0) or 0)+(t.get('ban_bs_venta',0) or 0))/2 or 1
+    dol_obs = t.get('dolar_obs',1) or 1
+    patrimonio = sum(
+        calcular_usdt_equiv(info.get('moneda',''), info.get('saldo',0) or 0, pat_bs, dol_obs)
+        for info in saldos.values()
+    )
+
+    inv = get_inventario()
+    gan_com = ops['gan_com'] or 0
+    gan_fin = ops['gan_fin'] or 0
+    gan_total = gan_com + gan_fin
+    utilidad_neta = gan_total - gastos
+
+    import json
+    saldos_json = json.dumps({k: {'saldo': v.get('saldo',0), 'moneda': v.get('moneda','')}
+                               for k,v in saldos.items()})
+    tasas_json = json.dumps({
+        'ban_bs_compra': t.get('ban_bs_compra'),
+        'ban_bs_venta': t.get('ban_bs_venta'),
+        'dolar_obs': t.get('dolar_obs'),
+        'trm': t.get('trm'),
+        'western': t.get('western'),
+    })
+
+    # Insertar o actualizar cierre
+    if cierre_exist:
+        conn.execute("""UPDATE cierres_diarios SET
+            estado='CERRADO', patrimonio_usdt=?, ganancia_comercial_usdt=?,
+            ganancia_financiera_usdt=?, ganancia_total_usdt=?, gastos_usdt=?,
+            utilidad_neta_usdt=?, cxc_total=?, cxp_total=?,
+            inventario_usdt=?, cpp_bs=?, saldos_json=?, tasas_cierre_json=?,
+            ops_total=?, volumen_usdt=?, usuario_cierre=?,
+            fecha_cierre=CURRENT_TIMESTAMP
+            WHERE fecha=?""",
+            (patrimonio, gan_com, gan_fin, gan_total, gastos, utilidad_neta,
+             cxc, cxp, inv['cantidad'], inv['cpp_bs'],
+             saldos_json, tasas_json, ops['cnt'], ops['vol'], usuario, hoy))
+    else:
+        conn.execute("""INSERT INTO cierres_diarios
+            (fecha, estado, patrimonio_usdt, ganancia_comercial_usdt,
+             ganancia_financiera_usdt, ganancia_total_usdt, gastos_usdt,
+             utilidad_neta_usdt, cxc_total, cxp_total, inventario_usdt,
+             cpp_bs, saldos_json, tasas_cierre_json, ops_total, volumen_usdt,
+             usuario_cierre)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (hoy, 'CERRADO', patrimonio, gan_com, gan_fin, gan_total, gastos,
+             utilidad_neta, cxc, cxp, inv['cantidad'], inv['cpp_bs'],
+             saldos_json, tasas_json, ops['cnt'], ops['vol'], usuario))
+
+    # Insertar en ledger
+    ledger_insert(
+        tipo='CIERRE_DIARIO',
+        cuenta_debe='APERTURA',
+        cuenta_haber='APERTURA',
+        moneda='USDT',
+        monto=patrimonio,
+        descripcion=f"Cierre diario {hoy} — Utilidad: {utilidad_neta:.4f} USDT",
+        usuario=usuario,
+    )
+
+    conn.commit(); conn.close()
+
+    alerta_c2c = "" if c2c_hoy > 0 else "\n⚠️ C2C Binance no importado hoy"
+    return True, f"""✅ *CIERRE DIARIO — {hoy}*
+━━━━━━━━━━━━━━━━━━━━
+Operaciones: `{ops['cnt']}` | Vol: `{ops['vol']:.4f} USDT`
+Ganancia comercial: `{gan_com:.4f} USDT`
+Ganancia financiera: `{gan_fin:.4f} USDT`
+Gastos: `{gastos:.4f} USDT`
+━━━━━━━━━━━━━━━━━━━━
+💰 *Utilidad neta: `{utilidad_neta:.4f} USDT`*
+🏛️ Patrimonio: `{patrimonio:.4f} USDT`
+📋 CXC pendiente: `{cxc:.4f} USDT`
+📋 CXP pendiente: `{cxp:.4f} USDT`
+📦 Inventario: `{inv['cantidad']:.4f} USDT`{alerta_c2c}"""
+
+def reconstruir_dia(fecha_str):
+    """Reconstruye el estado completo de un día desde el ledger."""
+    conn = get_conn()
+    # Buscar cierre de ese día
+    cierre = conn.execute(
+        "SELECT * FROM cierres_diarios WHERE fecha=?", (fecha_str,)
+    ).fetchone()
+
+    if not cierre:
+        conn.close()
+        return f"Sin cierre registrado para {fecha_str}"
+
+    import json
+    try:
+        saldos = json.loads(cierre['saldos_json'])
+        tasas = json.loads(cierre['tasas_cierre_json'])
+    except: saldos = {}; tasas = {}
+
+    m = f"📅 *RECONSTRUCCIÓN — {fecha_str}*\n━━━━━━━━━━━━━━━━━━━━\n\n"
+    m += f"*P&L DEL DÍA:*\n"
+    m += f"  Ganancia comercial: `{cierre['ganancia_comercial_usdt']:.4f} USDT`\n"
+    m += f"  Ganancia financiera: `{cierre['ganancia_financiera_usdt']:.4f} USDT`\n"
+    m += f"  Gastos: `{cierre['gastos_usdt']:.4f} USDT`\n"
+    m += f"  Utilidad neta: `{cierre['utilidad_neta_usdt']:.4f} USDT`\n\n"
+    m += f"*PATRIMONIO AL CIERRE:*\n"
+    m += f"  Total: `{cierre['patrimonio_usdt']:.4f} USDT`\n"
+    m += f"  Inventario: `{cierre['inventario_usdt']:.4f} USDT`\n\n"
+    m += f"*PENDIENTES AL CIERRE:*\n"
+    m += f"  CXC: `{cierre['cxc_total']:.4f} USDT`\n"
+    m += f"  CXP: `{cierre['cxp_total']:.4f} USDT`\n\n"
+    m += f"*OPERACIONES:*\n"
+    m += f"  Total: `{cierre['ops_total']}` | Vol: `{cierre['volumen_usdt']:.4f} USDT`\n"
+    m += f"  Cerrado por: `{cierre['usuario_cierre']}`\n"
+    conn.close()
+    return m
+
+
 def segundos_hasta_proximo_en_punto():
     """Calcula segundos hasta el próximo :00 o :30."""
     ahora = now_local()
@@ -3431,6 +4521,7 @@ def loop_mercado():
 
     while True:
         try:
+            # Obtener anuncios reales top 2 para historial y alertas
             compras_bs, ventas_bs = get_top_anuncios_bs()
             clp_ads = get_top_anuncios_clp()
             cop_ads = get_top_anuncios_cop()
@@ -3440,16 +4531,32 @@ def loop_mercado():
             if compras_bs or ventas_bs:
                 guardar_precio_historico(compras_bs, ventas_bs, compras_clp_h, cop_ads)
 
-            # Obtener mercado completo (referencia + Maker)
-            mercado = get_mercado_bs_completo()
-            mk_c = mercado['maker_compras']
-            mk_v = mercado['maker_ventas']
-            spread_maker = (mk_v[0]['precio'] - mk_c[0]['precio']) if mk_c and mk_v else 0
-            tendencia = analizar_tendencia_spread(spread_maker) if spread_maker > 0 else None
-            print(f"[loop_mercado] mk_c={len(mk_c)} mk_v={len(mk_v)} spread_maker={spread_maker:.2f} umbral={SPREAD_MIN_ALERTA}")
+            # Calcular spread usando la MISMA fuente que /tasas
+            # (promedio de 3 anuncios con transAmount=1000 por banco)
+            ban_c, ban_v, ban_s = get_binance_banco_promedio("Banesco")
+            mer_c, mer_v, mer_s = get_binance_banco_promedio("Mercantil")
 
-            if mk_c and mk_v and spread_maker > 0:
-                precio_venta_mk = mk_v[0]['precio']
+            # Mejor banco y spread
+            if (mer_s or 0) > (ban_s or 0):
+                mejor_banco = "Mercantil"
+                spread_maker = mer_s or 0
+                precio_compra_maker = mer_c or 0
+                precio_venta_maker  = mer_v or 0
+            else:
+                mejor_banco = "Banesco"
+                spread_maker = ban_s or 0
+                precio_compra_maker = ban_c or 0
+                precio_venta_maker  = ban_v or 0
+
+            tendencia = analizar_tendencia_spread(spread_maker) if spread_maker > 0 else None
+            print(f"[loop_mercado] spread_maker={spread_maker:.2f} ({mejor_banco}) umbral={SPREAD_MIN_ALERTA} clp_ads={bool(clp_ads)}")
+
+            # Para mostrar en alertas, usar anuncios reales top 2
+            mk_c = compras_bs
+            mk_v = ventas_bs
+
+            if spread_maker > 0:
+                precio_venta_mk = precio_venta_maker
                 if spread_maker >= SPREAD_MIN_ALERTA and abs(precio_venta_mk - ultimo_precio_bs_venta) >= SPREAD_CAMBIO_BS:
                     send(TELEGRAM_CHAT_ID, msg_alerta_bs(mk_c, mk_v, spread_maker))
                     ultimo_precio_bs_venta = precio_venta_mk
@@ -3470,11 +4577,12 @@ def loop_mercado():
                     alerta_cayendo = msg_alerta_spread_cayendo(spread_maker)
                     if alerta_cayendo:
                         send(TELEGRAM_CHAT_ID, alerta_cayendo)
-                    ultimo_precio_bs_venta = spread_maker
+                    ultimo_precio_bs_venta = precio_venta_maker
 
                     # Verificar arbitraje triangular si hay datos CLP
-                    if clp_ads and ultimo_datos:
-                        alerta_tri = msg_alerta_triangular(500000, clp_ads, ventas_bs, ultimo_datos)
+                    compras_clp_tri = clp_ads[0] if isinstance(clp_ads, tuple) else clp_ads
+                    if compras_clp_tri and ultimo_datos:
+                        alerta_tri = msg_alerta_triangular(500000, compras_clp_tri, ventas_bs, ultimo_datos)
                         if alerta_tri:
                             send(TELEGRAM_CHAT_ID, alerta_tri)
                         else:
@@ -3508,17 +4616,21 @@ def loop_mercado():
 
             # Alerta CLP si cambió >= 5 CLP
             compras_clp, ventas_clp = clp_ads if isinstance(clp_ads, tuple) else ([], clp_ads)
-            if compras_clp:
-                precio_compra_clp = compras_clp[0]['precio']
-                precio_venta_clp  = ventas_clp[0]['precio'] if ventas_clp else 0
-                precio_ref = precio_venta_clp or precio_compra_clp
+            if ventas_clp:
+                # Usamos precio de venta (donde tú vendes USDT) como referencia
+                precio_ref = ventas_clp[0]['precio']
+                if abs(precio_ref - ultimo_precio_clp) >= CAMBIO_MIN_CLP:
+                    send(TELEGRAM_CHAT_ID, msg_alerta_clp(compras_clp, ventas_clp))
+                    ultimo_precio_clp = precio_ref
+            elif compras_clp:
+                precio_ref = compras_clp[0]['precio']
                 if abs(precio_ref - ultimo_precio_clp) >= CAMBIO_MIN_CLP:
                     send(TELEGRAM_CHAT_ID, msg_alerta_clp(compras_clp, ventas_clp))
                     ultimo_precio_clp = precio_ref
 
             # Verificar ranking si hay sesión activa
-            if sesion_activa and mk_c and mk_v:
-                alerta_ranking = verificar_ranking_bs(mk_c, mk_v)
+            if sesion_activa and compras_bs and ventas_bs:
+                alerta_ranking = verificar_ranking_bs(compras_bs, ventas_bs)
                 if alerta_ranking:
                     send(TELEGRAM_CHAT_ID, alerta_ranking)
 
@@ -3553,22 +4665,29 @@ def loop_western_reminder():
         time.sleep(300)  # Revisar cada 5 min
 
 def loop_reporte_diario():
-    """Envía reporte de análisis todos los días a las 11 PM."""
-    print("▶ Loop reporte diario iniciado")
+    print("▶ Loop reporte diario + cierre iniciado")
     reporte_enviado_hoy = None
-
+    cierre_ejecutado_hoy = None
     while True:
         try:
             ahora = now_local()
             hoy = str(ahora.date())
             hora = ahora.hour
-
             if hora == 23 and reporte_enviado_hoy != hoy:
                 send(TELEGRAM_CHAT_ID, generar_reporte_diario())
                 reporte_enviado_hoy = hoy
+            if hora == 0 and cierre_ejecutado_hoy != hoy:
+                conn_c = get_conn()
+                c2c_cnt = conn_c.execute("SELECT COUNT(*) as c FROM operaciones WHERE fecha=? AND metodo LIKE '%Binance%'", (hoy,)).fetchone()['c']
+                conn_c.close()
+                if c2c_cnt == 0:
+                    send(TELEGRAM_CHAT_ID, f"⚠️ *CIERRE PENDIENTE {hoy}*\nNo se importo C2C hoy.\n/cierredia forzar → cierra sin C2C")
+                else:
+                    ok, msg = ejecutar_cierre_diario(usuario='automatico')
+                    send(TELEGRAM_CHAT_ID, msg)
+                cierre_ejecutado_hoy = hoy
         except Exception as e:
-            print(f"Error reporte diario: {e}")
-
+            print(f"Error loop diario: {e}")
         time.sleep(300)
 
 def loop_reporte_semanal():
