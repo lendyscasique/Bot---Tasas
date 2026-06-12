@@ -1350,6 +1350,9 @@ def consultar_y_guardar(western_rate=None):
     cop_c,cop_v = get_binance_fiat_promedio("COP")
     dol_obs = get_dolar_observado()
     trm     = get_trm()
+    # Guardar TRM del día para que no se pierda cuando llega la de mañana
+    if trm:
+        set_config('trm_hoy', str(trm))
     bcv_usd,bcv_eur = get_bcv()
     mejor = "Mercantil" if (mer_s or 0) > (ban_s or 0) else "Banesco"
     mejor_venta = mer_v if mejor=="Mercantil" else ban_v
@@ -1644,8 +1647,10 @@ def construir_mensaje(d, es_especial=False):
         m += f"🇺🇸➡️🇻🇪  USD → Bs      `{fmt(tasa_usd_bs,2)} Bs`\n"
         m += f"🇻🇪➡️🇺🇸  Bs → USD      `{fmt(tasa_bs_usd,2)} Bs`\n"
     if d.get('tasa_gsa_cop_bs'):
-        m += f"🇨🇴➡️🇻🇪  COP → Bs      `{fmt(d['tasa_gsa_cop_bs'],4)}`\n"
-        m += f"🇻🇪➡️🇨🇴  Bs → COP      `{fmt(d['tasa_gsa_bs_cop'],4)}`\n"
+        # COP→Bs: cliente da COP y recibe Bs → usa tasa bs_cop (más alta)
+        # Bs→COP: cliente da Bs y recibe COP → usa tasa cop_bs (más baja)
+        m += f"🇨🇴➡️🇻🇪  COP → Bs      `{fmt(d['tasa_gsa_bs_cop'],4)}`\n"
+        m += f"🇻🇪➡️🇨🇴  Bs → COP      `{fmt(d['tasa_gsa_cop_bs'],4)}`\n"
     m += "\n"
 
     # Compra/Venta Pesos Colombianos
@@ -3206,17 +3211,18 @@ def anticipar_trm():
         limite_clp_cop_hoy = t.get('limite_clp_cop', 0) or 0
         
         emoji = "📈" if variacion > 0 else "📉"
-        m = f"{emoji} *TRM PUBLICADA PARA MAÑANA*\n\n"
-        m += f"TRM hoy:    `{trm_hoy:,.2f} COP`\n"
-        m += f"TRM mañana: `{trm_manana:,.2f} COP`\n"
-        m += f"Variación:  `{variacion:+.2f} COP` (`{pct:+.1f}%`)\n\n"
+        m = f"{emoji} *TRM ACTUALIZADA*\n\n"
+        m += f"✅ TRM vigente hoy:    `{trm_hoy:,.2f} COP`\n"
+        m += f"📅 TRM vigente mañana: `{trm_manana:,.2f} COP`\n"
+        m += f"Variación: `{variacion:+.2f} COP` (`{pct:+.1f}%`)\n\n"
+        m += f"_La TRM de hoy sigue vigente hasta medianoche_\n"
         if limite_clp_cop_nuevo and limite_clp_cop_hoy:
-            m += f"📐 *Impacto en límites mañana:*\n"
+            m += f"\n📐 *Impacto en límites desde mañana:*\n"
             m += f"Límite CLP/COP hoy:    `{limite_clp_cop_hoy:.4f}`\n"
             if variacion > 0:
-                m += f"💡 Mañana puedes cotizar COP más caro\n"
+                m += f"💡 Desde mañana puedes cotizar COP más caro\n"
             else:
-                m += f"💡 Mañana debes cotizar COP más barato\n"
+                m += f"💡 Desde mañana debes cotizar COP más barato\n"
         return m
     except: return None
 
