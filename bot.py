@@ -2520,33 +2520,37 @@ def procesar(chat_id, texto):
 
     # ── SIMULAR ──
     elif cmd in ('/simular', '/sim'):
-        if cmd == '/simular' or len(partes) < 3:
+        texto_completo = texto.strip()
+        if cmd == '/simular' or '|' not in texto_completo:
             send(chat_id, msg_simular_ayuda())
         else:
             try:
-                tipo_op = partes[1].upper().replace('-','→').replace('>','→')
-                # Normalizar tipo
+                sin_cmd = texto_completo[len(cmd):].strip()
+                campos = [c.strip() for c in sin_cmd.split('|')]
+                tipo_raw = campos[0].upper().replace(' ','')
+                tipo_op = tipo_raw
                 for t in TIPOS_OPERACION_VALIDOS:
-                    if tipo_op.replace('→','').replace('-','') == t.replace('→',''):
-                        tipo_op = t
-                        break
-                monto_str = partes[2].replace(',','').replace('.','',partes[2].count('.')-1)
-                monto = float(monto_str)
-                cliente = partes[3] if len(partes) > 3 else 'Cliente'
-                corresponsal = partes[4] if len(partes) > 4 else '-'
-                corresponsal = corresponsal.replace('_', ' ')
-
+                    if tipo_raw.replace('→','').replace('-','') == t.replace('→',''):
+                        tipo_op = t; break
+                monto = float(campos[1].replace(',','')) if len(campos)>1 else 0
+                cliente = campos[2] if len(campos)>2 else 'Cliente'
+                metodo = campos[3] if len(campos)>3 else 'Transferencia'
+                corresponsal = campos[4] if len(campos)>4 else 'Ninguno'
+                delivery = campos[5] if len(campos)>5 else 'No'
+                referido = campos[6] if len(campos)>6 else 'No'
+                notas = campos[7] if len(campos)>7 else '-'
                 if tipo_op not in TIPOS_OPERACION_VALIDOS:
                     send(chat_id, f"❌ Tipo no válido: `{tipo_op}`\n\n{msg_simular_ayuda()}")
                 else:
-                    resultado, error = calcular_cotizacion(tipo_op, monto, cliente, corresponsal)
+                    resultado, error = calcular_cotizacion(
+                        tipo_op, monto, cliente, metodo,
+                        corresponsal, delivery, referido, notas)
                     if error:
                         send(chat_id, f"⚠️ {error}")
                     else:
                         send(chat_id, msg_cotizacion(resultado))
             except Exception as e:
-                send(chat_id, f"❌ Error: {e}\n\nUso: `/sim CLP→BS 500000 Juan Bancolombia_C1`")
-
+                send(chat_id, f"❌ Error: {e}\nUso: /sim CLP→BS | 500000 | Juan | Transferencia | Bancolombia_C1 | No | No | -")
     elif cmd=='/sim':
         if len(partes) >= 3:
             try:
@@ -4958,43 +4962,38 @@ def calcular_simulacion(tipo_op, monto, cliente, corresponsal, t):
     return res
 
 def msg_simular_ayuda():
-    """Mensaje de ayuda del simulador."""
+    """Plantilla del simulador — un solo mensaje."""
     m = "💱 *SIMULADOR DE COTIZACIÓN*\n"
     m += "━━━━━━━━━━━━━━━━━━━━\n\n"
     m += "Copia, completa y envía:\n\n"
-    m += "`/sim TIPO MONTO CLIENTE CORRESPONSAL`\n\n"
-    m += "*Ejemplos:*\n"
-    m += "`/sim CLP→BS 500000 Juan Bancolombia_C1`\n"
-    m += "`/sim BS→COP 35000 Maria Orlando`\n"
-    m += "`/sim CLP→COP 200000 Pedro Western`\n"
-    m += "`/sim BS→USDT 50000 -`\n"
-    m += "`/sim COP→BS 190000 Deymara -`\n\n"
-    m += "*Tipos disponibles:*\n"
-    tipos = [
-        "CLP→BS  | BS→CLP",
-        "CLP→COP | COP→CLP",
-        "COP→BS  | BS→COP",
-        "CLP→USDT| USDT→CLP",
-        "BS→USDT | USDT→BS",
-        "CLP→USD | USD→CLP",
-        "BS→USD  | USD→BS",
-        "COP→USD | USD→COP",
-        "COP→USDT| USDT→COP",
-        "BS→USDC | USDC→BS",
-        "USDC→USDT|USDT→USDC",
-    ]
-    for t in tipos:
-        m += f"`{t}`\n"
-    m += "\n_Si no hay corresponsal escribe `-`_"
+    m += "`/sim TIPO | MONTO | CLIENTE | MÉTODO | CORRESPONSAL | DELIVERY | REFERIDO | NOTAS`\n\n"
+    m += "*Ejemplo:*\n"
+    m += "`/sim CLP→BS | 500000 | Juan Pérez | Transferencia | Bancolombia_C1 | No | Si:Pedro:1.5 | -`\n\n"
+    m += "*Campos:*\n"
+    m += "`1. TIPO`  → CLP→BS, BS→CLP, CLP→COP, COP→CLP\n"
+    m += "             COP→BS, BS→COP, CLP→USDT, USDT→CLP\n"
+    m += "             BS→USDT, USDT→BS, CLP→USD, USD→CLP\n"
+    m += "             BS→USD, USD→BS, COP→USD, USD→COP\n"
+    m += "             COP→USDT, USDT→COP, BS→USDC\n"
+    m += "             USDC→BS, USDC→USDT, USDT→USDC\n\n"
+    m += "`2. MONTO`  → monto que entrega el cliente\n"
+    m += "`3. CLIENTE` → nombre del cliente\n"
+    m += "`4. MÉTODO`  → Transferencia / Efectivo / PagoMovil\n"
+    m += "`5. CORRESPONSAL` → Bancolombia_C1, Bancolombia_C2\n"
+    m += "                    Nequi_C1, Nequi_C2, Nequi_C3\n"
+    m += "                    Orlando, Ninguno\n"
+    m += "                    Nuevo:NombreTitular (registra nuevo)\n"
+    m += "`6. DELIVERY` → No / Si:MONTO_COP\n"
+    m += "`7. REFERIDO` → No / Si:Nombre:PORCENTAJE\n"
+    m += "`8. NOTAS`    → observaciones o -\n"
     return m
 
-def calcular_cotizacion(tipo_op, monto_entrada, cliente, corresponsal):
-    """Calcula cotización completa para una operación."""
+def calcular_cotizacion(tipo_op, monto_entrada, cliente, metodo, corresponsal, delivery, referido, notas):
+    """Calcula cotización completa incluyendo CPP, corresponsal, referido y delivery."""
     t = get_ultima_tasa()
     if not t:
         return None, "Sin tasas disponibles. Espera el próximo ciclo."
 
-    # Tasas base
     pat_bs  = ((t.get('ban_bs_compra',0) or 0) + (t.get('ban_bs_venta',0) or 0)) / 2 or 1
     dol_obs = t.get('dolar_obs', 1) or 1
     trm     = t.get('trm', 1) or 1
@@ -5011,355 +5010,306 @@ def calcular_cotizacion(tipo_op, monto_entrada, cliente, corresponsal):
     tasa_gsa_bs_cop  = t.get('tasa_gsa_bs_cop', 0) or 0
     tasa_gsa_cop_bs  = t.get('tasa_gsa_cop_bs', 0) or 0
 
-    ban_bs_compra = t.get('ban_bs_compra', 0) or 0
-    ban_bs_venta  = t.get('ban_bs_venta', 0) or 0
+    ban_bs_compra  = t.get('ban_bs_compra', 0) or 0
+    ban_bs_venta   = t.get('ban_bs_venta', 0) or 0
     ban_clp_compra = t.get('ban_clp_compra', 0) or 0
     ban_clp_venta  = t.get('ban_clp_venta', 0) or 0
 
-    resultado = {
-        'tipo_op': tipo_op,
-        'monto_entrada': monto_entrada,
-        'cliente': cliente,
-        'corresponsal': corresponsal,
-        'tasa_cliente': 0,
-        'tasa_limite': 0,
-        'tasa_referencia': 0,
-        'monto_salida': 0,
-        'mon_entrada': '',
-        'mon_salida': '',
-        'usdt_equiv': 0,
-        'gan_comercial': 0,
-        'com_corresponsal': 0,
-        'com_referido': 0,
-        'gan_neta': 0,
-        'fee_binance': 0,
-        'notas': [],
+    r = {
+        'tipo_op': tipo_op, 'monto_entrada': monto_entrada,
+        'cliente': cliente, 'metodo': metodo,
+        'corresponsal': corresponsal, 'delivery': delivery,
+        'referido': referido, 'notas': notas,
+        'tasa_cliente': 0, 'tasa_limite': 0,
+        'monto_salida': 0, 'mon_entrada': '', 'mon_salida': '',
+        'usdt_equiv': 0, 'gan_comercial': 0,
+        'cpp_bs': 0, 'gan_financiera': 0,
+        'com_corresponsal': 0, 'com_referido': 0,
+        'pct_referido': 0, 'nombre_referido': '',
+        'fee_binance': 0, 'monto_delivery': 0,
+        'gan_neta': 0, 'alertas': [],
     }
 
-    # ── CLP → BS ──
+    # ── CALCULAR MONTO SALIDA Y TASA SEGÚN TIPO ──
     if tipo_op == 'CLP→BS':
-        resultado['mon_entrada'] = 'CLP'
-        resultado['mon_salida']  = 'BS'
-        resultado['tasa_limite'] = round(limite_clp_bs, 6)
-        resultado['tasa_cliente'] = round(tasa_gsa_clp_bs, 6)
-        resultado['tasa_referencia'] = round(tasa_gsa_clp_bs, 6)
-        resultado['monto_salida'] = round(monto_entrada * tasa_gsa_clp_bs, 2)
-        resultado['usdt_equiv'] = round(monto_entrada / dol_obs, 4)
-        diferencial = limite_clp_bs - tasa_gsa_clp_bs
-        resultado['gan_comercial'] = round(resultado['usdt_equiv'] * diferencial / limite_clp_bs, 4)
+        r['mon_entrada']='CLP'; r['mon_salida']='BS'
+        r['tasa_limite']=round(limite_clp_bs,6)
+        r['tasa_cliente']=round(tasa_gsa_clp_bs,6)
+        r['monto_salida']=round(monto_entrada*tasa_gsa_clp_bs,2)
+        r['usdt_equiv']=round(monto_entrada/dol_obs,4)
+        r['gan_comercial']=round(r['usdt_equiv']*(limite_clp_bs-tasa_gsa_clp_bs)/limite_clp_bs,4) if limite_clp_bs else 0
 
-    # ── BS → CLP ──
     elif tipo_op == 'BS→CLP':
-        resultado['mon_entrada'] = 'BS'
-        resultado['mon_salida']  = 'CLP'
-        resultado['tasa_limite'] = round(1/limite_clp_bs, 6) if limite_clp_bs else 0
-        resultado['tasa_cliente'] = round(tasa_gsa_bs_clp, 6)
-        resultado['tasa_referencia'] = round(tasa_gsa_bs_clp, 6)
-        resultado['monto_salida'] = round(monto_entrada * tasa_gsa_bs_clp, 2)
-        resultado['usdt_equiv'] = round(monto_entrada / pat_bs, 4)
-        resultado['gan_comercial'] = round(resultado['usdt_equiv'] * 0.055, 4)
+        r['mon_entrada']='BS'; r['mon_salida']='CLP'
+        r['tasa_limite']=round(1/limite_clp_bs,6) if limite_clp_bs else 0
+        r['tasa_cliente']=round(tasa_gsa_bs_clp,6)
+        r['monto_salida']=round(monto_entrada*tasa_gsa_bs_clp,2)
+        r['usdt_equiv']=round(monto_entrada/pat_bs,4)
+        r['gan_comercial']=round(r['usdt_equiv']*0.055,4)
 
-    # ── CLP → COP ──
     elif tipo_op == 'CLP→COP':
-        if not western:
-            return None, "⚠️ Western no registrado hoy. Usa /western TASA primero."
-        resultado['mon_entrada'] = 'CLP'
-        resultado['mon_salida']  = 'COP'
-        resultado['tasa_limite'] = round(limite_clp_cop, 6)
-        resultado['tasa_cliente'] = round(tasa_gsa_clp_cop, 6)
-        resultado['tasa_referencia'] = round(tasa_gsa_clp_cop, 6)
-        resultado['monto_salida'] = round(monto_entrada * tasa_gsa_clp_cop, 2)
-        resultado['usdt_equiv'] = round(monto_entrada / dol_obs, 4)
-        resultado['gan_comercial'] = round(resultado['usdt_equiv'] * 0.075, 4)
+        if not western: return None,"⚠️ Western no registrado. Usa /western TASA primero."
+        r['mon_entrada']='CLP'; r['mon_salida']='COP'
+        r['tasa_limite']=round(limite_clp_cop,6)
+        r['tasa_cliente']=round(tasa_gsa_clp_cop,6)
+        r['monto_salida']=round(monto_entrada*tasa_gsa_clp_cop,2)
+        r['usdt_equiv']=round(monto_entrada/dol_obs,4)
+        r['gan_comercial']=round(r['usdt_equiv']*0.075,4)
 
-    # ── COP → CLP ──
     elif tipo_op == 'COP→CLP':
-        if not western:
-            return None, "⚠️ Western no registrado hoy. Usa /western TASA primero."
-        resultado['mon_entrada'] = 'COP'
-        resultado['mon_salida']  = 'CLP'
-        resultado['tasa_limite'] = round(1/limite_clp_cop, 6) if limite_clp_cop else 0
-        resultado['tasa_cliente'] = round(tasa_gsa_cop_clp, 6)
-        resultado['tasa_referencia'] = round(tasa_gsa_cop_clp, 6)
-        resultado['monto_salida'] = round(monto_entrada * tasa_gsa_cop_clp, 2)
-        resultado['usdt_equiv'] = round(monto_entrada / trm, 4)
-        resultado['gan_comercial'] = round(resultado['usdt_equiv'] * 0.075, 4)
+        if not western: return None,"⚠️ Western no registrado. Usa /western TASA primero."
+        r['mon_entrada']='COP'; r['mon_salida']='CLP'
+        r['tasa_limite']=round(1/limite_clp_cop,6) if limite_clp_cop else 0
+        r['tasa_cliente']=round(tasa_gsa_cop_clp,6)
+        r['monto_salida']=round(monto_entrada*tasa_gsa_cop_clp,2)
+        r['usdt_equiv']=round(monto_entrada/trm,4)
+        r['gan_comercial']=round(r['usdt_equiv']*0.075,4)
 
-    # ── BS → COP ──
     elif tipo_op == 'BS→COP':
-        resultado['mon_entrada'] = 'BS'
-        resultado['mon_salida']  = 'COP'
-        resultado['tasa_limite'] = round(limite_bs_cop, 6)
-        resultado['tasa_cliente'] = round(tasa_gsa_bs_cop, 6)
-        resultado['tasa_referencia'] = round(tasa_gsa_bs_cop, 6)
-        resultado['monto_salida'] = round(monto_entrada * tasa_gsa_bs_cop, 2)
-        resultado['usdt_equiv'] = round(monto_entrada / pat_bs, 4)
-        resultado['gan_comercial'] = round(resultado['usdt_equiv'] * 0.055, 4)
+        r['mon_entrada']='BS'; r['mon_salida']='COP'
+        r['tasa_limite']=round(limite_bs_cop,6)
+        r['tasa_cliente']=round(tasa_gsa_bs_cop,6)
+        r['monto_salida']=round(monto_entrada*tasa_gsa_bs_cop,2)
+        r['usdt_equiv']=round(monto_entrada/pat_bs,4)
+        r['gan_comercial']=round(r['usdt_equiv']*0.055,4)
 
-    # ── COP → BS ──
     elif tipo_op == 'COP→BS':
-        resultado['mon_entrada'] = 'COP'
-        resultado['mon_salida']  = 'BS'
-        resultado['tasa_limite'] = round(1/limite_bs_cop, 6) if limite_bs_cop else 0
-        resultado['tasa_cliente'] = round(tasa_gsa_cop_bs, 6)
-        resultado['tasa_referencia'] = round(tasa_gsa_cop_bs, 6)
-        resultado['monto_salida'] = round(monto_entrada * tasa_gsa_cop_bs, 2)
-        resultado['usdt_equiv'] = round(monto_entrada / trm, 4)
-        resultado['gan_comercial'] = round(resultado['usdt_equiv'] * 0.055, 4)
+        r['mon_entrada']='COP'; r['mon_salida']='BS'
+        r['tasa_limite']=round(1/limite_bs_cop,6) if limite_bs_cop else 0
+        r['tasa_cliente']=round(tasa_gsa_cop_bs,6)
+        r['monto_salida']=round(monto_entrada*tasa_gsa_cop_bs,2)
+        r['usdt_equiv']=round(monto_entrada/trm,4)
+        r['gan_comercial']=round(r['usdt_equiv']*0.055,4)
 
-    # ── CLP → USDT ──
     elif tipo_op == 'CLP→USDT':
         precio = ban_clp_compra or dol_obs
-        resultado['mon_entrada'] = 'CLP'
-        resultado['mon_salida']  = 'USDT'
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(precio, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada / precio, 4)
-        resultado['usdt_equiv'] = resultado['monto_salida']
-        resultado['fee_binance'] = round(resultado['usdt_equiv'] * 0.002, 4)
-        resultado['notas'].append(f"Fee Binance CLP: 0.2% = {resultado['fee_binance']:.4f} USDT")
+        r['mon_entrada']='CLP'; r['mon_salida']='USDT'
+        r['tasa_cliente']=round(precio,2); r['tasa_limite']=round(precio,2)
+        r['monto_salida']=round(monto_entrada/precio,4)
+        r['usdt_equiv']=r['monto_salida']
+        r['fee_binance']=round(r['usdt_equiv']*0.002,4)
 
-    # ── USDT → CLP ──
     elif tipo_op == 'USDT→CLP':
         precio = ban_clp_venta or dol_obs
-        resultado['mon_entrada'] = 'USDT'
-        resultado['mon_salida']  = 'CLP'
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(precio, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada * precio, 2)
-        resultado['usdt_equiv'] = monto_entrada
-        resultado['fee_binance'] = round(monto_entrada * 0.002, 4)
-        resultado['notas'].append(f"Fee Binance CLP: 0.2% = {resultado['fee_binance']:.4f} USDT")
+        r['mon_entrada']='USDT'; r['mon_salida']='CLP'
+        r['tasa_cliente']=round(precio,2); r['tasa_limite']=round(precio,2)
+        r['monto_salida']=round(monto_entrada*precio,2)
+        r['usdt_equiv']=monto_entrada
+        r['fee_binance']=round(monto_entrada*0.002,4)
 
-    # ── BS → USDT ──
     elif tipo_op == 'BS→USDT':
-        precio = ban_bs_compra
-        resultado['mon_entrada'] = 'BS'
-        resultado['mon_salida']  = 'USDT'
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(precio, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada / precio, 4) if precio else 0
-        resultado['usdt_equiv'] = resultado['monto_salida']
-        resultado['fee_binance'] = round(resultado['usdt_equiv'] * 0.0025, 4)
-        resultado['notas'].append(f"Fee Binance BS: 0.25% = {resultado['fee_binance']:.4f} USDT")
+        r['mon_entrada']='BS'; r['mon_salida']='USDT'
+        r['tasa_cliente']=round(ban_bs_compra,2); r['tasa_limite']=round(ban_bs_compra,2)
+        r['monto_salida']=round(monto_entrada/ban_bs_compra,4) if ban_bs_compra else 0
+        r['usdt_equiv']=r['monto_salida']
+        r['fee_binance']=round(r['usdt_equiv']*0.0025,4)
 
-    # ── USDT → BS ──
     elif tipo_op == 'USDT→BS':
-        precio = ban_bs_venta
-        resultado['mon_entrada'] = 'USDT'
-        resultado['mon_salida']  = 'BS'
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(precio, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada * precio, 2)
-        resultado['usdt_equiv'] = monto_entrada
-        resultado['fee_binance'] = round(monto_entrada * 0.0025, 4)
-        resultado['notas'].append(f"Fee Binance BS: 0.25% = {resultado['fee_binance']:.4f} USDT")
+        r['mon_entrada']='USDT'; r['mon_salida']='BS'
+        r['tasa_cliente']=round(ban_bs_venta,2); r['tasa_limite']=round(ban_bs_venta,2)
+        r['monto_salida']=round(monto_entrada*ban_bs_venta,2)
+        r['usdt_equiv']=monto_entrada
+        r['fee_binance']=round(monto_entrada*0.0025,4)
 
-    # ── CLP → USD ──
     elif tipo_op == 'CLP→USD':
-        precio = dol_obs * 1.055
-        resultado['mon_entrada'] = 'CLP'
-        resultado['mon_salida']  = 'USD'
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(dol_obs, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada / precio, 4)
-        resultado['usdt_equiv'] = round(monto_entrada / dol_obs, 4)
-        resultado['gan_comercial'] = round(resultado['usdt_equiv'] * 0.055, 4)
+        precio=dol_obs*1.055
+        r['mon_entrada']='CLP'; r['mon_salida']='USD'
+        r['tasa_cliente']=round(precio,2); r['tasa_limite']=round(dol_obs,2)
+        r['monto_salida']=round(monto_entrada/precio,4)
+        r['usdt_equiv']=round(monto_entrada/dol_obs,4)
+        r['gan_comercial']=round(r['usdt_equiv']*0.055,4)
 
-    # ── USD → CLP ──
     elif tipo_op == 'USD→CLP':
-        precio = dol_obs * 0.945
-        resultado['mon_entrada'] = 'USD'
-        resultado['mon_salida']  = 'CLP'
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(dol_obs, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada * precio, 2)
-        resultado['usdt_equiv'] = monto_entrada
-        resultado['gan_comercial'] = round(monto_entrada * 0.055, 4)
+        precio=dol_obs*0.945
+        r['mon_entrada']='USD'; r['mon_salida']='CLP'
+        r['tasa_cliente']=round(precio,2); r['tasa_limite']=round(dol_obs,2)
+        r['monto_salida']=round(monto_entrada*precio,2)
+        r['usdt_equiv']=monto_entrada
+        r['gan_comercial']=round(monto_entrada*0.055,4)
 
-    # ── BS → USD ──
     elif tipo_op == 'BS→USD':
-        resultado['mon_entrada'] = 'BS'
-        resultado['mon_salida']  = 'USD'
-        precio = pat_bs * 0.945
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(pat_bs, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada / precio, 4) if precio else 0
-        resultado['usdt_equiv'] = round(monto_entrada / pat_bs, 4)
-        resultado['gan_comercial'] = round(resultado['usdt_equiv'] * 0.055, 4)
+        precio=pat_bs*0.945
+        r['mon_entrada']='BS'; r['mon_salida']='USD'
+        r['tasa_cliente']=round(precio,2); r['tasa_limite']=round(pat_bs,2)
+        r['monto_salida']=round(monto_entrada/precio,4) if precio else 0
+        r['usdt_equiv']=round(monto_entrada/pat_bs,4)
+        r['gan_comercial']=round(r['usdt_equiv']*0.055,4)
 
-    # ── USD → BS ──
     elif tipo_op == 'USD→BS':
-        resultado['mon_entrada'] = 'USD'
-        resultado['mon_salida']  = 'BS'
-        precio = pat_bs * 1.055
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(pat_bs, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada * precio, 2)
-        resultado['usdt_equiv'] = monto_entrada
-        resultado['gan_comercial'] = round(monto_entrada * 0.055, 4)
+        precio=pat_bs*1.055
+        r['mon_entrada']='USD'; r['mon_salida']='BS'
+        r['tasa_cliente']=round(precio,2); r['tasa_limite']=round(pat_bs,2)
+        r['monto_salida']=round(monto_entrada*precio,2)
+        r['usdt_equiv']=monto_entrada
+        r['gan_comercial']=round(monto_entrada*0.055,4)
 
-    # ── COP → USD ──
     elif tipo_op == 'COP→USD':
-        resultado['mon_entrada'] = 'COP'
-        resultado['mon_salida']  = 'USD'
-        precio = trm * 1.055
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(trm, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada / precio, 4) if precio else 0
-        resultado['usdt_equiv'] = round(monto_entrada / trm, 4)
-        resultado['gan_comercial'] = round(resultado['usdt_equiv'] * 0.055, 4)
+        precio=trm*1.055
+        r['mon_entrada']='COP'; r['mon_salida']='USD'
+        r['tasa_cliente']=round(precio,2); r['tasa_limite']=round(trm,2)
+        r['monto_salida']=round(monto_entrada/precio,4) if precio else 0
+        r['usdt_equiv']=round(monto_entrada/trm,4)
+        r['gan_comercial']=round(r['usdt_equiv']*0.055,4)
 
-    # ── USD → COP ──
     elif tipo_op == 'USD→COP':
-        resultado['mon_entrada'] = 'USD'
-        resultado['mon_salida']  = 'COP'
-        precio = trm * 0.945
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(trm, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada * precio, 2)
-        resultado['usdt_equiv'] = monto_entrada
-        resultado['gan_comercial'] = round(monto_entrada * 0.055, 4)
+        precio=trm*0.945
+        r['mon_entrada']='USD'; r['mon_salida']='COP'
+        r['tasa_cliente']=round(precio,2); r['tasa_limite']=round(trm,2)
+        r['monto_salida']=round(monto_entrada*precio,2)
+        r['usdt_equiv']=monto_entrada
+        r['gan_comercial']=round(monto_entrada*0.055,4)
 
-    # ── COP → USDT ──
     elif tipo_op == 'COP→USDT':
-        resultado['mon_entrada'] = 'COP'
-        resultado['mon_salida']  = 'USDT'
-        precio = trm
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(precio, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada / precio, 4) if precio else 0
-        resultado['usdt_equiv'] = resultado['monto_salida']
+        r['mon_entrada']='COP'; r['mon_salida']='USDT'
+        r['tasa_cliente']=round(trm,2); r['tasa_limite']=round(trm,2)
+        r['monto_salida']=round(monto_entrada/trm,4) if trm else 0
+        r['usdt_equiv']=r['monto_salida']
 
-    # ── USDT → COP ──
     elif tipo_op == 'USDT→COP':
-        resultado['mon_entrada'] = 'USDT'
-        resultado['mon_salida']  = 'COP'
-        precio = trm
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(precio, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada * precio, 2)
-        resultado['usdt_equiv'] = monto_entrada
+        r['mon_entrada']='USDT'; r['mon_salida']='COP'
+        r['tasa_cliente']=round(trm,2); r['tasa_limite']=round(trm,2)
+        r['monto_salida']=round(monto_entrada*trm,2)
+        r['usdt_equiv']=monto_entrada
 
-    # ── BS → USDC ──
     elif tipo_op == 'BS→USDC':
-        resultado['mon_entrada'] = 'BS'
-        resultado['mon_salida']  = 'USDC'
-        precio = pat_bs
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(precio, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada / precio, 4) if precio else 0
-        resultado['usdt_equiv'] = resultado['monto_salida']
-        resultado['notas'].append("Operación vía Airtm")
+        r['mon_entrada']='BS'; r['mon_salida']='USDC'
+        r['tasa_cliente']=round(pat_bs,2); r['tasa_limite']=round(pat_bs,2)
+        r['monto_salida']=round(monto_entrada/pat_bs,4) if pat_bs else 0
+        r['usdt_equiv']=r['monto_salida']
+        r['alertas'].append("Operación vía Airtm")
 
-    # ── USDC → BS ──
     elif tipo_op == 'USDC→BS':
-        resultado['mon_entrada'] = 'USDC'
-        resultado['mon_salida']  = 'BS'
-        precio = pat_bs
-        resultado['tasa_cliente'] = round(precio, 2)
-        resultado['tasa_limite']  = round(precio, 2)
-        resultado['tasa_referencia'] = round(precio, 2)
-        resultado['monto_salida'] = round(monto_entrada * precio, 2)
-        resultado['usdt_equiv'] = monto_entrada
-        resultado['notas'].append("Operación vía Airtm")
+        r['mon_entrada']='USDC'; r['mon_salida']='BS'
+        r['tasa_cliente']=round(pat_bs,2); r['tasa_limite']=round(pat_bs,2)
+        r['monto_salida']=round(monto_entrada*pat_bs,2)
+        r['usdt_equiv']=monto_entrada
+        r['alertas'].append("Operación vía Airtm")
 
-    # ── USDC → USDT ──
     elif tipo_op == 'USDC→USDT':
-        resultado['mon_entrada'] = 'USDC'
-        resultado['mon_salida']  = 'USDT'
-        resultado['tasa_cliente'] = 1.0
-        resultado['tasa_limite']  = 1.0
-        resultado['tasa_referencia'] = 1.0
-        resultado['monto_salida'] = round(monto_entrada * 0.993, 4)  # fee Airtm ~0.7%
-        resultado['usdt_equiv'] = resultado['monto_salida']
-        resultado['notas'].append("Fee retiro Airtm ~0.7%")
+        r['mon_entrada']='USDC'; r['mon_salida']='USDT'
+        r['tasa_cliente']=1.0; r['tasa_limite']=1.0
+        r['monto_salida']=round(monto_entrada*0.993,4)
+        r['usdt_equiv']=r['monto_salida']
+        r['alertas'].append("Fee retiro Airtm ~0.7%")
 
-    # ── USDT → USDC ──
     elif tipo_op == 'USDT→USDC':
-        resultado['mon_entrada'] = 'USDT'
-        resultado['mon_salida']  = 'USDC'
-        resultado['tasa_cliente'] = 1.0
-        resultado['tasa_limite']  = 1.0
-        resultado['tasa_referencia'] = 1.0
-        resultado['monto_salida'] = round(monto_entrada, 4)
-        resultado['usdt_equiv'] = monto_entrada
-        resultado['notas'].append("Conversión interna Binance")
+        r['mon_entrada']='USDT'; r['mon_salida']='USDC'
+        r['tasa_cliente']=1.0; r['tasa_limite']=1.0
+        r['monto_salida']=round(monto_entrada,4)
+        r['usdt_equiv']=monto_entrada
+        r['alertas'].append("Conversión interna Binance")
 
     else:
-        return None, f"Tipo de operación no reconocido: {tipo_op}"
+        return None, f"Tipo no reconocido: {tipo_op}"
 
-    # Calcular comisión corresponsal
-    if corresponsal and corresponsal != '-' and resultado['usdt_equiv'] > 0:
-        resultado['com_corresponsal'] = round(resultado['usdt_equiv'] * 0.025, 4)
+    # ── CPP DEL INVENTARIO ──
+    inv = get_inventario()
+    if inv['cantidad'] > 0 and inv['cpp_bs'] > 0:
+        r['cpp_bs'] = inv['cpp_bs']
+        if tipo_op in ('USDT→BS', 'USDT→CLP', 'USDT→COP'):
+            precio_venta = ban_bs_venta if tipo_op=='USDT→BS' else (ban_clp_venta or dol_obs)
+            r['gan_financiera'] = round((precio_venta - inv['cpp_bs']) * monto_entrada / precio_venta, 4) if precio_venta else 0
+        elif tipo_op in ('CLP→BS', 'BS→CLP', 'COP→BS'):
+            usdt_necesario = r['usdt_equiv']
+            if inv['cantidad'] >= usdt_necesario:
+                r['gan_financiera'] = round((ban_bs_venta - inv['cpp_bs']) * usdt_necesario / ban_bs_venta, 4) if ban_bs_venta else 0
+            elif inv['cantidad'] > 0:
+                r['gan_financiera'] = round((ban_bs_venta - inv['cpp_bs']) * inv['cantidad'] / ban_bs_venta, 4) if ban_bs_venta else 0
+                r['alertas'].append(f"Inventario parcial: {inv['cantidad']:.4f} USDT disponibles")
 
-    # Ganancia neta
-    resultado['gan_neta'] = round(
-        resultado['gan_comercial']
-        - resultado['com_corresponsal']
-        - resultado['fee_binance'],
+    # ── CORRESPONSAL ──
+    if corresponsal and corresponsal not in ('-', 'Ninguno', 'ninguno'):
+        if corresponsal.startswith('Nuevo:'):
+            nombre_nuevo = corresponsal.replace('Nuevo:', '').replace('_', ' ')
+            r['alertas'].append(f"Nuevo corresponsal: {nombre_nuevo} — se registrará")
+            r['com_corresponsal'] = round(r['usdt_equiv'] * 0.025, 4)
+        else:
+            r['com_corresponsal'] = round(r['usdt_equiv'] * 0.025, 4)
+
+    # ── DELIVERY ──
+    if delivery and delivery.upper() not in ('NO', '-'):
+        try:
+            monto_del = float(delivery.replace('Si:', '').replace('SI:', '').replace(',', ''))
+            r['monto_delivery'] = monto_del
+            r['alertas'].append(f"Delivery: {monto_del:,.0f} COP")
+        except: pass
+
+    # ── REFERIDO ──
+    if referido and referido.upper() not in ('NO', '-'):
+        try:
+            partes_ref = referido.replace('Si:', '').replace('SI:', '').split(':')
+            nombre_ref = partes_ref[0].strip()
+            pct_ref = float(partes_ref[1].strip()) / 100 if len(partes_ref) > 1 else 0.015
+            r['nombre_referido'] = nombre_ref
+            r['pct_referido'] = pct_ref
+            r['com_referido'] = round(r['usdt_equiv'] * pct_ref, 4)
+        except: pass
+
+    # ── GANANCIA NETA ──
+    r['gan_neta'] = round(
+        r['gan_comercial']
+        + r['gan_financiera']
+        - r['com_corresponsal']
+        - r['com_referido']
+        - r['fee_binance'],
         4
     )
 
-    return resultado, None
+    return r, None
 
 def msg_cotizacion(r):
-    """Formatea el mensaje de cotización."""
-    tipo = r['tipo_op']
-    mon_e = r['mon_entrada']
-    mon_s = r['mon_salida']
-
-    def fmt_monto(m, mon):
+    """Formatea el mensaje de cotización completo."""
+    def fmt(m, mon):
         if mon in ('USDT','USDC','USD'): return f"{m:,.4f} {mon}"
-        if mon == 'BS': return f"{m:,.2f} Bs"
+        if mon == 'BS':  return f"{m:,.2f} Bs"
         if mon == 'CLP': return f"{m:,.0f} CLP"
         if mon == 'COP': return f"{m:,.0f} COP"
         return f"{m} {mon}"
 
-    lineas = [
-        f"\U0001f4b1 *COTIZACI\u00f3N {tipo}*",
-        "\u2501" * 20,
-        f"\U0001f464 Cliente: `{r['cliente']}`",
-    ]
-    if r['corresponsal'] and r['corresponsal'] != '-':
-        lineas.append(f"\U0001f3e6 Corresponsal: `{r['corresponsal']}`")
-    lineas.append("")
-    lineas.append(f"\U0001f4e5 Entrega: `{fmt_monto(r['monto_entrada'], mon_e)}`")
-    lineas.append(f"\U0001f4e4 Recibe:  `{fmt_monto(r['monto_salida'], mon_s)}`")
-    lineas.append("")
-    lineas.append(f"\U0001f4ca Tasa aplicada: `{r['tasa_cliente']}`")
+    m  = f"💱 *COTIZACIÓN {r['tipo_op']}*\n"
+    m += f"━━━━━━━━━━━━━━━━━━━━\n"
+    m += f"👤 Cliente:    `{r['cliente']}`\n"
+    m += f"💳 Método:     `{r['metodo']}`\n"
+    if r['corresponsal'] and r['corresponsal'] not in ('-','Ninguno'):
+        nombre_corresp = r['corresponsal'].replace('_',' ').replace('Nuevo:','NUEVO: ')
+        m += f"🏦 Corresponsal: `{nombre_corresp}`\n"
+    m += f"\n"
+    m += f"📥 Entrega: `{fmt(r['monto_entrada'], r['mon_entrada'])}`\n"
+    m += f"📤 Recibe:  `{fmt(r['monto_salida'], r['mon_salida'])}`\n"
+    m += f"\n"
+    m += f"📊 Tasa GSA: `{r['tasa_cliente']}`\n"
     if r['tasa_limite'] and r['tasa_limite'] != r['tasa_cliente']:
-        lineas.append(f"\U0001f4d0 Tasa l\u00edmite:   `{r['tasa_limite']}`")
-    lineas.append("")
-    lineas.append("\u2501" * 20)
-    lineas.append(f"\U0001f4b5 USDT equiv: `{r['usdt_equiv']:.4f} USDT`")
-    if r['gan_comercial'] > 0:
-        lineas.append(f"\U0001f4b0 Ganancia comercial: `{r['gan_comercial']:.4f} USDT`")
-    if r['fee_binance'] > 0:
-        lineas.append(f"\u2699\ufe0f Fee Binance: `-{r['fee_binance']:.4f} USDT`")
-    if r['com_corresponsal'] > 0:
-        lineas.append(f"\U0001f3e6 Com. corresponsal: `-{r['com_corresponsal']:.4f} USDT`")
-    if r['gan_neta'] != 0:
-        emoji = "\u2705" if r['gan_neta'] > 0 else "\u26a0\ufe0f"
-        lineas.append(f"{emoji} Ganancia neta: `{r['gan_neta']:.4f} USDT`")
-    if r['notas']:
-        lineas.append("")
-        lineas.append("\U0001f4cc " + " | ".join(r['notas']))
-    return "\n".join(lineas)
+        m += f"📐 Límite:   `{r['tasa_limite']}`\n"
+    m += f"\n"
+    m += f"━━━━━━━━━━━━━━━━━━━━\n"
+    m += f"💼 USDT equiv: `{r['usdt_equiv']:.4f} USDT`\n"
 
+    if r['gan_comercial'] > 0:
+        m += f"💰 Ganancia comercial: `{r['gan_comercial']:.4f} USDT`\n"
+    if r['cpp_bs'] > 0 and r['gan_financiera'] != 0:
+        m += f"📦 CPP inventario:     `{r['cpp_bs']:.2f} Bs`\n"
+        m += f"💎 Ganancia financiera: `{r['gan_financiera']:.4f} USDT`\n"
+    if r['fee_binance'] > 0:
+        m += f"⚙️ Fee Binance: `-{r['fee_binance']:.4f} USDT`\n"
+    if r['com_corresponsal'] > 0:
+        nombre_c = r['corresponsal'].replace('_',' ')
+        m += f"🏦 Com. {nombre_c}: `-{r['com_corresponsal']:.4f} USDT`\n"
+    if r['com_referido'] > 0:
+        m += f"👥 Com. {r['nombre_referido']} ({r['pct_referido']*100:.1f}%): `-{r['com_referido']:.4f} USDT`\n"
+    if r['monto_delivery'] > 0:
+        m += f"🚚 Delivery: `{r['monto_delivery']:,.0f} COP`\n"
+
+    m += f"━━━━━━━━━━━━━━━━━━━━\n"
+    emoji = "✅" if r['gan_neta'] > 0 else "⚠️"
+    m += f"{emoji} *Ganancia neta: `{r['gan_neta']:.4f} USDT`*\n"
+
+    if r['alertas']:
+        m += f"\n📌 " + " | ".join(r['alertas'])
+
+    if r['notas'] and r['notas'] != '-':
+        m += f"\n📝 {r['notas']}"
+
+    return m
 
 def segundos_hasta_proximo_en_punto():
     """Calcula segundos hasta el próximo :00 o :30."""
