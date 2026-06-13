@@ -2546,10 +2546,18 @@ def procesar(chat_id, texto):
                 titular_corresp = campos.get('TITULAR','')
                 com_corresp_pct = float(campos.get('COM_CORRESPONSAL','0').replace('%','')) / 100
                 referido = campos.get('REFERIDO','No')
-                com_ref_default = '0'
-                if tipo_op == 'CLP→COP': com_ref_default = '3'
-                elif tipo_op == 'COP→COP': com_ref_default = '1.5'
-                com_ref_pct = float(campos.get('COM_REFERIDO', com_ref_default).replace('%','')) / 100
+
+                # Comisión referido automática por tipo
+                if referido.lower() not in ('no','-','ninguno',''):
+                    if tipo_op == 'CLP→COP':
+                        com_ref_pct = 0.03   # 3%
+                    elif tipo_op == 'COP→COP':
+                        com_ref_pct = 0.015  # 1.5%
+                    else:
+                        com_ref_pct = 0.0    # 0% por ahora
+                else:
+                    com_ref_pct = 0.0
+
                 delivery_val = campos.get('DELIVERY','No')
                 monto_delivery = float(campos.get('MONTO_DELIVERY','0').replace(',','')) if delivery_val.lower() in ('sí','si','s') else 0
                 notas = campos.get('NOTAS','-')
@@ -2566,9 +2574,9 @@ def procesar(chat_id, texto):
                         send(chat_id, f"⚠️ {error}")
                     else:
                         resultado['entrega'] = entrega
-                        # Mensaje 1: para el operador
+                        # Mensaje 1: operador
                         send(chat_id, msg_cotizacion(resultado))
-                        # Mensaje 2: para el cliente
+                        # Mensaje 2: cliente
                         send(chat_id, "📤 *MENSAJE PARA EL CLIENTE:*\n" + msg_cliente(resultado))
             except Exception as e:
                 send(chat_id, f"❌ Error: {e}\nUsa /simular para ver el formato")
@@ -4985,7 +4993,7 @@ def calcular_simulacion(tipo_op, monto, cliente, corresponsal, t):
     return res
 
 def msg_simular_ayuda():
-    """Plantilla del simulador con todos los campos."""
+    """Plantilla del simulador — COM-REFERIDO es automático."""
     m  = "💱 *SIMULADOR DE COTIZACIÓN*\n"
     m += "━━━━━━━━━━━━━━━━━━━━\n\n"
     m += "Copia, completa y envía:\n\n"
@@ -4993,28 +5001,27 @@ def msg_simular_ayuda():
     m += "`TIPO: CLP-COP`\n"
     m += "`MONTO: 100000`\n"
     m += "`CLIENTE: Nombre`\n"
-    m += "`METODO: Efectivo`\n"
+    m += "`METODO: Transferencia`\n"
     m += "`ENTREGA: Transferencia`\n"
     m += "`CORRESPONSAL: Bancolombia`\n"
     m += "`TITULAR: Nataly Florez`\n"
     m += "`COM-CORRESPONSAL: 2.5`\n"
     m += "`REFERIDO: No`\n"
-    m += "`COM-REFERIDO: 0`\n"
     m += "`DELIVERY: No`\n"
     m += "`MONTO-DELIVERY: 0`\n"
     m += "`NOTAS: -`\n\n"
-    m += "*METODO* → cómo el cliente te paga:\n"
+    m += "*METODO* → cómo el cliente te paga a ti\n"
+    m += "*ENTREGA* → cómo tú le entregas al cliente\n"
     m += "`Transferencia / Efectivo / Pago Móvil`\n\n"
-    m += "*ENTREGA* → cómo tú le entregas al cliente:\n"
-    m += "`Transferencia / Efectivo / Pago Móvil`\n\n"
+    m += "*Comisión referido automática:*\n"
+    m += "`CLP-COP → 3%` | `COP-COP → 1.5%`\n"
+    m += "_Solo escribe el nombre del referido_\n\n"
     m += "*Tipos:*\n"
     m += "`CLP-BS  BS-CLP  CLP-COP  COP-CLP`\n"
     m += "`COP-BS  BS-COP  CLP-USDT USDT-CLP`\n"
     m += "`BS-USDT USDT-BS CLP-USD  USD-CLP`\n"
-    m += "`COP-COP (Western) COP-USDT USDT-COP`\n"
-    m += "`BS-USDC USDC-BS  USDC-USDT`\n\n"
-    m += "*Corresponsal:* Bancolombia / Nequi / Caja-COP / Caja-USD / Nuevo\n"
-    m += "*Comisiones auto:* CLP-COP → ref 3% | COP-COP → ref 1.5%"
+    m += "`COP-COP (Western) BS-USDC USDC-BS`\n\n"
+    m += "*Corresponsal:* Bancolombia / Nequi / Caja-COP / Caja-USD / Nuevo"
     return m
 
 
