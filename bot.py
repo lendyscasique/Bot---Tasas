@@ -2540,18 +2540,18 @@ def procesar(chat_id, texto):
 
                 monto = float(campos.get('MONTO','0').replace('.','').replace(',',''))
                 cliente = campos.get('CLIENTE','Cliente')
-                metodo = campos.get('METODO','Transferencia')
-                tipo_corresp = campos.get('CORRESPONSAL','Ninguno')
+                metodo = campos.get('METODO','Efectivo')
+                entrega = campos.get('ENTREGA','Efectivo')
+                tipo_corresp = campos.get('CORRESPONSAL','No')
                 titular_corresp = campos.get('TITULAR','')
                 com_corresp_pct = float(campos.get('COM_CORRESPONSAL','0').replace('%','')) / 100
                 referido = campos.get('REFERIDO','No')
-                # Comisiones automáticas por tipo
                 com_ref_default = '0'
                 if tipo_op == 'CLP→COP': com_ref_default = '3'
                 elif tipo_op == 'COP→COP': com_ref_default = '1.5'
                 com_ref_pct = float(campos.get('COM_REFERIDO', com_ref_default).replace('%','')) / 100
-                delivery = campos.get('DELIVERY','No')
-                monto_delivery = float(campos.get('MONTO_DELIVERY','0').replace(',','')) if delivery.lower() == 'sí' or delivery.lower() == 'si' else 0
+                delivery_val = campos.get('DELIVERY','No')
+                monto_delivery = float(campos.get('MONTO_DELIVERY','0').replace(',','')) if delivery_val.lower() in ('sí','si','s') else 0
                 notas = campos.get('NOTAS','-')
 
                 if tipo_op not in TIPOS_OP:
@@ -2561,11 +2561,15 @@ def procesar(chat_id, texto):
                         tipo_op, monto, cliente, metodo,
                         tipo_corresp, titular_corresp, com_corresp_pct,
                         referido, com_ref_pct,
-                        delivery, monto_delivery, notas)
+                        delivery_val, monto_delivery, notas)
                     if error:
                         send(chat_id, f"⚠️ {error}")
                     else:
+                        resultado['entrega'] = entrega
+                        # Mensaje 1: para el operador
                         send(chat_id, msg_cotizacion(resultado))
+                        # Mensaje 2: para el cliente
+                        send(chat_id, "📤 *MENSAJE PARA EL CLIENTE:*\n" + msg_cliente(resultado))
             except Exception as e:
                 send(chat_id, f"❌ Error: {e}\nUsa /simular para ver el formato")
 
@@ -4989,7 +4993,8 @@ def msg_simular_ayuda():
     m += "`TIPO: CLP-COP`\n"
     m += "`MONTO: 100000`\n"
     m += "`CLIENTE: Nombre`\n"
-    m += "`METODO: Transferencia`\n"
+    m += "`METODO: Efectivo`\n"
+    m += "`ENTREGA: Transferencia`\n"
     m += "`CORRESPONSAL: Bancolombia`\n"
     m += "`TITULAR: Nataly Florez`\n"
     m += "`COM-CORRESPONSAL: 2.5`\n"
@@ -4998,6 +5003,10 @@ def msg_simular_ayuda():
     m += "`DELIVERY: No`\n"
     m += "`MONTO-DELIVERY: 0`\n"
     m += "`NOTAS: -`\n\n"
+    m += "*METODO* → cómo el cliente te paga:\n"
+    m += "`Transferencia / Efectivo / Pago Móvil`\n\n"
+    m += "*ENTREGA* → cómo tú le entregas al cliente:\n"
+    m += "`Transferencia / Efectivo / Pago Móvil`\n\n"
     m += "*Tipos:*\n"
     m += "`CLP-BS  BS-CLP  CLP-COP  COP-CLP`\n"
     m += "`COP-BS  BS-COP  CLP-USDT USDT-CLP`\n"
@@ -5005,8 +5014,7 @@ def msg_simular_ayuda():
     m += "`COP-COP (Western) COP-USDT USDT-COP`\n"
     m += "`BS-USDC USDC-BS  USDC-USDT`\n\n"
     m += "*Corresponsal:* Bancolombia / Nequi / Caja-COP / Caja-USD / Nuevo\n"
-    m += "*Comisiones auto:* CLP-COP → ref 3% | COP-COP → ref 1.5%\n"
-    m += "*Delivery:* Sí/No — el cliente recibe menos COP"
+    m += "*Comisiones auto:* CLP-COP → ref 3% | COP-COP → ref 1.5%"
     return m
 
 
@@ -5280,7 +5288,7 @@ def calcular_cotizacion(tipo_op, monto_entrada, cliente, metodo, corresponsal, d
     return r, None
 
 def msg_cotizacion(r):
-    """Mensaje de cotización completo con rentabilidad."""
+    """Mensaje completo de cotización para el operador."""
     def fmt(m, mon):
         if mon in ('USDT','USDC','USD'): return f"{m:,.4f} {mon}"
         if mon == 'BS':  return f"{m:,.2f} Bs"
@@ -5288,25 +5296,31 @@ def msg_cotizacion(r):
         if mon == 'COP': return f"{m:,.0f} COP"
         return f"{m} {mon}"
 
-    tipo = r['tipo_op']
-    mon_e = r['mon_entrada']
+    t = get_ultima_tasa()
+    trm = t.get('trm', 1) or 1
     mon_s = r['mon_salida']
 
-    m  = f"💱 *COTIZACIÓN {tipo}*\n"
+    def usdt_a_cop(usdt):
+        return round(usdt * trm, 0)
+
+    def fmt_dual(usdt):
+        cop = usdt_a_cop(abs(usdt))
+        signo = "+" if usdt >= 0 else "-"
+        return f"`{signo}{abs(usdt):.4f} USDT` ({cop:,.0f} COP)"
+
+    m  = f"💱 *COTIZACIÓN {r['tipo_op']}*\n"
     m += f"━━━━━━━━━━━━━━━━━━━━\n"
     m += f"👤 Cliente: `{r['cliente']}`\n"
-    m += f"💳 Método:  `{r.get('metodo','')}`\n"
+    m += f"💳 Método pago:   `{r.get('metodo','')}`\n"
+    m += f"📦 Forma entrega: `{r.get('entrega','')}`\n"
 
-    # Corresponsal
-    if r.get('tipo_corresp') and r['tipo_corresp'].lower() not in ('ninguno','-',''):
+    if r.get('tipo_corresp') and r['tipo_corresp'].lower() not in ('no','ninguno','-',''):
         titular = r.get('titular_corresp','')
-        nombre_c = f"{r['tipo_corresp']} — {titular}" if titular else r['tipo_corresp']
+        nombre_c = f"{r['tipo_corresp']} — {titular}" if titular and titular.lower() != 'no' else r['tipo_corresp']
         m += f"🏦 Corresponsal: `{nombre_c}`\n"
 
     m += f"\n"
-
-    # Montos
-    m += f"📥 Entrega: `{fmt(r['monto_entrada'], mon_e)}`\n"
+    m += f"📥 Entrega: `{fmt(r['monto_entrada'], r['mon_entrada'])}`\n"
 
     if r.get('delivery_activo') and mon_s == 'COP':
         m += f"📤 Recibe:  `{fmt(r['monto_salida_con_delivery'], mon_s)}`\n"
@@ -5316,7 +5330,6 @@ def msg_cotizacion(r):
 
     m += f"\n"
 
-    # Tasas
     if r.get('delivery_activo') and mon_s == 'COP':
         m += f"📊 Tasa sin delivery: `{r['tasa_cliente']}`\n"
         m += f"📊 Tasa con delivery: `{r['tasa_con_delivery']}`\n"
@@ -5326,72 +5339,177 @@ def msg_cotizacion(r):
     if r.get('tasa_limite') and r['tasa_limite'] != r['tasa_cliente']:
         m += f"📐 Límite:   `{r['tasa_limite']}`\n"
 
-    m += f"\n"
-    m += f"━━━━━━━━━━━━━━━━━━━━\n"
-    m += f"💼 USDT equiv: `{r['usdt_equiv']:.4f} USDT`\n"
-    m += f"\n"
+    m += f"\n━━━━━━━━━━━━━━━━━━━━\n"
+    m += f"💼 USDT equiv: `{r['usdt_equiv']:.4f} USDT`\n\n"
 
-    # Ganancias
     if r['gan_comercial'] > 0:
-        m += f"💰 Ganancia comercial:  `+{r['gan_comercial']:.4f} USDT`\n"
+        m += f"💰 Ganancia comercial:  {fmt_dual(r['gan_comercial'])}\n"
     if r.get('gan_financiera', 0) > 0:
-        m += f"💎 Ganancia financiera: `+{r['gan_financiera']:.4f} USDT`\n"
-
-    # Costos
+        m += f"💎 Ganancia financiera: {fmt_dual(r['gan_financiera'])}\n"
     if r.get('fee_binance', 0) > 0:
-        m += f"⚙️ Fee Binance:         `-{r['fee_binance']:.4f} USDT`\n"
-
+        m += f"⚙️ Fee Binance:         {fmt_dual(-r['fee_binance'])}\n"
     if r.get('com_corresponsal_usdt', 0) > 0:
-        titular = r.get('titular_corresp', '')
+        titular = r.get('titular_corresp','')
         nombre_c = f"{r.get('tipo_corresp','')} {titular}".strip()
         pct = r.get('com_corresp_pct', 0) * 100
-        if r['mon_salida'] == 'COP':
-            m += f"🏦 {nombre_c} ({pct:.1f}%): `-{r['com_corresponsal']:,.0f} COP` (`-{r['com_corresponsal_usdt']:.4f} USDT`)\n"
-        else:
-            m += f"🏦 {nombre_c} ({pct:.1f}%): `-{r['com_corresponsal_usdt']:.4f} USDT`\n"
-
+        m += f"🏦 {nombre_c} ({pct:.1f}%): {fmt_dual(-r['com_corresponsal_usdt'])}\n"
     if r.get('com_referido_usdt', 0) > 0:
         pct_r = r.get('pct_referido', 0) * 100
-        if r['mon_salida'] == 'COP':
-            m += f"👥 {r['nombre_referido']} ({pct_r:.1f}%): `-{r['com_referido']:,.0f} COP` (`-{r['com_referido_usdt']:.4f} USDT`)\n"
-        else:
-            m += f"👥 {r['nombre_referido']} ({pct_r:.1f}%): `-{r['com_referido_usdt']:.4f} USDT`\n"
-
+        m += f"👥 {r['nombre_referido']} ({pct_r:.1f}%): {fmt_dual(-r['com_referido_usdt'])}\n"
     if r.get('delivery_activo'):
         m += f"🚚 Delivery (cliente asume): `{fmt(r['monto_delivery'], 'COP')}`\n"
 
     m += f"━━━━━━━━━━━━━━━━━━━━\n"
-
-    # Resultado con alerta
     alerta = r.get('alerta_rentabilidad', 'OK')
     if alerta == 'PERDIDA':
-        emoji_r = "❌"
-        sufijo = " — PÉRDIDA"
+        emoji_r = "❌"; sufijo = " — PÉRDIDA"
     elif alerta == 'MUY_BAJO':
-        emoji_r = "⚠️"
-        sufijo = " — MUY BAJO"
+        emoji_r = "⚠️"; sufijo = " — MUY BAJO"
     elif alerta == 'BAJO':
-        emoji_r = "🟡"
-        sufijo = " — BAJO"
+        emoji_r = "🟡"; sufijo = " — BAJO"
     else:
-        emoji_r = "✅"
-        sufijo = ""
+        emoji_r = "✅"; sufijo = ""
 
-    m += f"{emoji_r} *Ganancia neta: `{r['gan_neta']:.4f} USDT`{sufijo}*\n"
+    m += f"{emoji_r} *Ganancia neta: {fmt_dual(r['gan_neta'])}{sufijo}*\n"
 
-    # Sugerencias si pérdida
     if alerta == 'PERDIDA':
-        m += f"\n💡 *Para ser rentable considera:*\n"
+        m += f"\n💡 *Considera:*\n"
         if r.get('delivery_activo'):
-            m += f"   → Sin delivery: ganancia `{r['gan_neta'] + r.get('com_referido_usdt',0):.4f} USDT`\n"
+            sin_del = r['gan_neta'] + (r.get('com_referido_usdt',0))
+            m += f"   → Sin delivery: ~`{sin_del:.4f} USDT`\n"
         if r.get('com_referido_usdt', 0) > 0:
-            m += f"   → Sin referido: ganancia `{r['gan_neta'] + r.get('com_referido_usdt',0):.4f} USDT`\n"
-        m += f"   → Monto mayor mejora el margen\n"
+            sin_ref = r['gan_neta'] + r['com_referido_usdt']
+            m += f"   → Sin referido: ~`{sin_ref:.4f} USDT`\n"
+        m += f"   → Aumentar el monto mejora el margen\n"
 
-    if r.get('alertas'):
-        m += f"\n📌 " + " | ".join(r['alertas'])
     if r.get('notas') and r['notas'] != '-':
         m += f"\n📝 {r['notas']}"
+
+    return m
+
+def msg_cliente(r):
+    """Mensaje para enviar al cliente — sin datos internos."""
+    from datetime import datetime
+    ahora = now_local()
+    fecha = ahora.strftime('%d/%m/%Y')
+    hora  = ahora.strftime('%I:%M %p')
+    mon_s = r['mon_salida']
+    entrega = r.get('entrega', 'Efectivo').strip()
+
+    def fmt(m, mon):
+        if mon in ('USDT','USDC','USD'): return f"{m:,.2f} {mon}"
+        if mon == 'BS':  return f"{m:,.2f} Bs"
+        if mon == 'CLP': return f"${m:,.0f} CLP"
+        if mon == 'COP': return f"${m:,.0f} COP"
+        return f"{m} {mon}"
+
+    # Monto que recibe (con delivery ya descontado)
+    if r.get('delivery_activo') and mon_s == 'COP':
+        monto_recibe = r['monto_salida_con_delivery']
+    else:
+        monto_recibe = r['monto_salida']
+
+    # Nombre tipo operación legible
+    tipo_legible = {
+        'CLP→BS': 'Giro Chile → Venezuela',
+        'BS→CLP': 'Giro Venezuela → Chile',
+        'CLP→COP': 'Giro Chile → Colombia',
+        'COP→CLP': 'Giro Colombia → Chile',
+        'COP→BS': 'Giro Colombia → Venezuela',
+        'BS→COP': 'Giro Venezuela → Colombia',
+        'COP→COP': 'Giro Western Union',
+        'CLP→USD': 'Compra Dólares',
+        'USD→CLP': 'Venta Dólares',
+    }.get(r['tipo_op'], r['tipo_op'])
+
+    m  = f"📋 *GSA Cambios*\n"
+    m += f"━━━━━━━━━━━━━━━━━━━━\n"
+    m += f"📅 Fecha: {fecha}\n"
+    m += f"⏰ Hora:  {hora}\n"
+    m += f"👤 Cliente: {r['cliente']}\n"
+    m += f"━━━━━━━━━━━━━━━━━━━━\n"
+    m += f"Operación: *{tipo_legible}*\n\n"
+    m += f"Usted entrega: *{fmt(r['monto_entrada'], r['mon_entrada'])}*\n"
+    m += f"Usted recibe:  *{fmt(monto_recibe, mon_s)}*\n\n"
+
+    # Datos según método de entrega
+    if entrega.lower() == 'transferencia':
+        if mon_s == 'COP':
+            m += f"Transferencia a:\n"
+            m += f"🏦 Banco:\n"
+            m += f"👤 Titular:\n"
+            m += f"🔢 Número de cuenta:\n"
+            m += f"📱 Tipo: Ahorros / Corriente\n"
+        elif mon_s == 'BS':
+            m += f"Transferencia a:\n"
+            m += f"🏦 Banco:\n"
+            m += f"👤 Titular:\n"
+            m += f"🆔 Cédula del titular:\n"
+            m += f"🔢 Número de cuenta:\n"
+        elif mon_s == 'CLP':
+            m += f"Transferencia a:\n"
+            m += f"🏦 Banco:\n"
+            m += f"👤 Titular:\n"
+            m += f"🔢 RUT:\n"
+            m += f"🔢 Número de cuenta:\n"
+        m += f"\n_Por favor responda con sus datos_\n"
+        m += f"_para procesar su operación_\n"
+
+    elif entrega.lower() == 'pago movil' or entrega.lower() == 'pago móvil':
+        m += f"Pago Móvil a:\n"
+        m += f"📱 Teléfono:\n"
+        m += f"🏦 Banco:\n"
+        m += f"🆔 Cédula:\n"
+        m += f"\n_Por favor responda con sus datos_\n"
+
+    elif entrega.lower() == 'efectivo':
+        m += f"Método de entrega: *Efectivo*\n"
+
+    m += f"━━━━━━━━━━━━━━━━━━━━\n"
+    m += f"_Gracias por confiar en GSA Cambios_ 🤝"
+
+    return m
+
+
+def msg_cotizacion_cliente(r):
+    """Mensaje limpio para enviar al cliente — sin costos ni comisiones."""
+    from datetime import datetime
+    ahora = now_local()
+    fecha = ahora.strftime("%d/%m/%Y")
+    hora  = ahora.strftime("%I:%M %p")
+
+    def fmt(m, mon):
+        if mon in ('USDT','USDC','USD'): return f"{m:,.4f} {mon}"
+        if mon == 'BS':  return f"{m:,.2f} Bs"
+        if mon == 'CLP': return f"{m:,.0f} CLP"
+        if mon == 'COP': return f"{m:,.0f} COP"
+        return f"{m} {mon}"
+
+    mon_e = r['mon_entrada']
+    mon_s = r['mon_salida']
+    tipo  = r['tipo_op']
+
+    # Monto que recibe el cliente (con delivery ya descontado si aplica)
+    if r.get('delivery_activo') and mon_s == 'COP':
+        monto_recibe = r['monto_salida_con_delivery']
+    else:
+        monto_recibe = r['monto_salida']
+
+    m  = f"📋 *GSA CAMBIOS*\n"
+    m += f"━━━━━━━━━━━━━━━━━━━━\n"
+    m += f"📅 Fecha: `{fecha}`\n"
+    m += f"🕐 Hora recibido: `{hora}`\n"
+    m += f"👤 Cliente: `{r['cliente']}`\n"
+    m += f"\n"
+    m += f"*Detalle de su operación:*\n"
+    m += f"💱 Tipo: `{tipo}`\n"
+    m += f"💳 Método: `{r.get('metodo','')}`\n"
+    m += f"\n"
+    m += f"📥 Usted entrega: `{fmt(r['monto_entrada'], mon_e)}`\n"
+    m += f"📤 Usted recibe:  `{fmt(monto_recibe, mon_s)}`\n"
+    m += f"\n"
+    m += f"━━━━━━━━━━━━━━━━━━━━\n"
+    m += f"_GSA Cambios — Compra y Venta de Divisas_"
 
     return m
 
