@@ -2520,23 +2520,19 @@ def procesar(chat_id, texto):
 
     # ── SIMULAR ──
     elif cmd in ('/simular', '/sim'):
-        # Detectar si es plantilla multilínea o comando directo
         lineas = texto.strip().split('\n')
         if len(lineas) <= 1:
-            # Sin parámetros → mostrar plantilla
             send(chat_id, msg_simular_ayuda())
         else:
             try:
-                # Parsear formato multilínea CAMPO: VALOR
                 campos = {}
-                for linea in lineas[1:]:  # skip primera línea con /sim
+                for linea in lineas[1:]:
                     linea = linea.strip()
                     if ':' in linea:
                         k, v = linea.split(':', 1)
-                        campos[k.strip().upper().replace('-','_')] = v.strip()
+                        campos[k.strip().upper().replace('-','_').replace(' ','_')] = v.strip()
 
                 tipo_raw = campos.get('TIPO','').upper().replace('-','→').replace(' ','')
-                # Normalizar tipo
                 tipo_op = tipo_raw
                 for t in TIPOS_OPERACION_VALIDOS:
                     if tipo_raw.replace('→','') == t.replace('→',''):
@@ -2545,27 +2541,33 @@ def procesar(chat_id, texto):
                 monto = float(campos.get('MONTO','0').replace('.','').replace(',',''))
                 cliente = campos.get('CLIENTE','Cliente')
                 metodo = campos.get('METODO','Transferencia')
-                corresponsal = campos.get('CORRESPONSAL','Ninguno')
-                com_corresp = float(campos.get('COM_CORRESPONSAL','2.5').replace('%','')) / 100
+                tipo_corresp = campos.get('CORRESPONSAL','Ninguno')
+                titular_corresp = campos.get('TITULAR','')
+                com_corresp_pct = float(campos.get('COM_CORRESPONSAL','0').replace('%','')) / 100
                 referido = campos.get('REFERIDO','No')
-                com_ref_pct = float(campos.get('COM_REFERIDO','0').replace('%','')) / 100
-                delivery = float(campos.get('DELIVERY','0').replace(',','').replace('.','',campos.get('DELIVERY','0').count('.')-1) if campos.get('DELIVERY','0').count('.') > 1 else campos.get('DELIVERY','0').replace(',',''))
+                # Comisiones automáticas por tipo
+                com_ref_default = '0'
+                if tipo_op == 'CLP→COP': com_ref_default = '3'
+                elif tipo_op == 'COP→COP': com_ref_default = '1.5'
+                com_ref_pct = float(campos.get('COM_REFERIDO', com_ref_default).replace('%','')) / 100
+                delivery = campos.get('DELIVERY','No')
+                monto_delivery = float(campos.get('MONTO_DELIVERY','0').replace(',','')) if delivery.lower() == 'sí' or delivery.lower() == 'si' else 0
                 notas = campos.get('NOTAS','-')
 
                 if tipo_op not in TIPOS_OPERACION_VALIDOS:
-                    send(chat_id, f"❌ Tipo no válido: `{tipo_op}`\nUsa /simular para ver los tipos disponibles")
+                    send(chat_id, f"❌ Tipo no válido: `{tipo_op}`\nUsa /simular para ver los tipos")
                 else:
                     resultado, error = calcular_cotizacion_v2(
                         tipo_op, monto, cliente, metodo,
-                        corresponsal, com_corresp,
+                        tipo_corresp, titular_corresp, com_corresp_pct,
                         referido, com_ref_pct,
-                        delivery, notas)
+                        delivery, monto_delivery, notas)
                     if error:
                         send(chat_id, f"⚠️ {error}")
                     else:
                         send(chat_id, msg_cotizacion(resultado))
             except Exception as e:
-                send(chat_id, f"❌ Error al procesar: {e}\nUsa /simular para ver el formato correcto")
+                send(chat_id, f"❌ Error: {e}\nUsa /simular para ver el formato")
 
 
     elif cmd=='/sim':
@@ -4979,36 +4981,32 @@ def calcular_simulacion(tipo_op, monto, cliente, corresponsal, t):
     return res
 
 def msg_simular_ayuda():
-    """Plantilla del simulador — formato limpio multilínea."""
+    """Plantilla del simulador con todos los campos."""
     m  = "💱 *SIMULADOR DE COTIZACIÓN*\n"
     m += "━━━━━━━━━━━━━━━━━━━━\n\n"
     m += "Copia, completa y envía:\n\n"
     m += "`/sim`\n"
-    m += "`TIPO: CLP-BS`\n"
-    m += "`MONTO: 500000`\n"
-    m += "`CLIENTE: Nombre Cliente`\n"
+    m += "`TIPO: CLP-COP`\n"
+    m += "`MONTO: 100000`\n"
+    m += "`CLIENTE: Nombre`\n"
     m += "`METODO: Transferencia`\n"
-    m += "`CORRESPONSAL: Bancolombia-C1`\n"
+    m += "`CORRESPONSAL: Bancolombia`\n"
+    m += "`TITULAR: Nataly Florez`\n"
     m += "`COM-CORRESPONSAL: 2.5`\n"
     m += "`REFERIDO: No`\n"
     m += "`COM-REFERIDO: 0`\n"
-    m += "`DELIVERY: 0`\n"
+    m += "`DELIVERY: No`\n"
+    m += "`MONTO-DELIVERY: 0`\n"
     m += "`NOTAS: -`\n\n"
-    m += "*Tipos disponibles:*\n"
+    m += "*Tipos:*\n"
     m += "`CLP-BS  BS-CLP  CLP-COP  COP-CLP`\n"
     m += "`COP-BS  BS-COP  CLP-USDT USDT-CLP`\n"
     m += "`BS-USDT USDT-BS CLP-USD  USD-CLP`\n"
-    m += "`BS-USD  USD-BS  COP-USD  USD-COP`\n"
-    m += "`COP-USDT USDT-COP BS-USDC USDC-BS`\n"
-    m += "`USDC-USDT USDT-USDC`\n\n"
-    m += "*Corresponsales:*\n"
-    m += "`Bancolombia-C1  Bancolombia-C2`\n"
-    m += "`Nequi-C1  Nequi-C2  Nequi-C3`\n"
-    m += "`Orlando  Ninguno  Nuevo:NombreTitular`\n\n"
-    m += "*Método:* Transferencia / Efectivo / PagoMovil\n"
-    m += "*Delivery:* monto en COP o 0\n"
-    m += "*Referido:* nombre o No\n"
-    m += "*Com-Referido:* % de comisión o 0"
+    m += "`COP-COP (Western) COP-USDT USDT-COP`\n"
+    m += "`BS-USDC USDC-BS  USDC-USDT`\n\n"
+    m += "*Corresponsal:* Bancolombia / Nequi / Caja-COP / Caja-USD / Nuevo\n"
+    m += "*Comisiones auto:* CLP-COP → ref 3% | COP-COP → ref 1.5%\n"
+    m += "*Delivery:* Sí/No — el cliente recibe menos COP"
     return m
 
 
@@ -5282,7 +5280,7 @@ def calcular_cotizacion(tipo_op, monto_entrada, cliente, metodo, corresponsal, d
     return r, None
 
 def msg_cotizacion(r):
-    """Formatea el mensaje de cotización completo."""
+    """Mensaje de cotización completo con rentabilidad."""
     def fmt(m, mon):
         if mon in ('USDT','USDC','USD'): return f"{m:,.4f} {mon}"
         if mon == 'BS':  return f"{m:,.2f} Bs"
@@ -5290,94 +5288,211 @@ def msg_cotizacion(r):
         if mon == 'COP': return f"{m:,.0f} COP"
         return f"{m} {mon}"
 
-    m  = f"💱 *COTIZACIÓN {r['tipo_op']}*\n"
+    tipo = r['tipo_op']
+    mon_e = r['mon_entrada']
+    mon_s = r['mon_salida']
+
+    m  = f"💱 *COTIZACIÓN {tipo}*\n"
     m += f"━━━━━━━━━━━━━━━━━━━━\n"
-    m += f"👤 Cliente:    `{r['cliente']}`\n"
-    m += f"💳 Método:     `{r['metodo']}`\n"
-    if r['corresponsal'] and r['corresponsal'] not in ('-','Ninguno'):
-        nombre_corresp = r['corresponsal'].replace('_',' ').replace('Nuevo:','NUEVO: ')
-        m += f"🏦 Corresponsal: `{nombre_corresp}`\n"
+    m += f"👤 Cliente: `{r['cliente']}`\n"
+    m += f"💳 Método:  `{r.get('metodo','')}`\n"
+
+    # Corresponsal
+    if r.get('tipo_corresp') and r['tipo_corresp'].lower() not in ('ninguno','-',''):
+        titular = r.get('titular_corresp','')
+        nombre_c = f"{r['tipo_corresp']} — {titular}" if titular else r['tipo_corresp']
+        m += f"🏦 Corresponsal: `{nombre_c}`\n"
+
     m += f"\n"
-    m += f"📥 Entrega: `{fmt(r['monto_entrada'], r['mon_entrada'])}`\n"
-    m += f"📤 Recibe:  `{fmt(r['monto_salida'], r['mon_salida'])}`\n"
+
+    # Montos
+    m += f"📥 Entrega: `{fmt(r['monto_entrada'], mon_e)}`\n"
+
+    if r.get('delivery_activo') and mon_s == 'COP':
+        m += f"📤 Recibe:  `{fmt(r['monto_salida_con_delivery'], mon_s)}`\n"
+        m += f"   _({fmt(r['monto_salida'], mon_s)} − {fmt(r['monto_delivery'], 'COP')} delivery)_\n"
+    else:
+        m += f"📤 Recibe:  `{fmt(r['monto_salida'], mon_s)}`\n"
+
     m += f"\n"
-    m += f"📊 Tasa GSA: `{r['tasa_cliente']}`\n"
-    if r['tasa_limite'] and r['tasa_limite'] != r['tasa_cliente']:
+
+    # Tasas
+    if r.get('delivery_activo') and mon_s == 'COP':
+        m += f"📊 Tasa sin delivery: `{r['tasa_cliente']}`\n"
+        m += f"📊 Tasa con delivery: `{r['tasa_con_delivery']}`\n"
+    else:
+        m += f"📊 Tasa GSA: `{r['tasa_cliente']}`\n"
+
+    if r.get('tasa_limite') and r['tasa_limite'] != r['tasa_cliente']:
         m += f"📐 Límite:   `{r['tasa_limite']}`\n"
+
     m += f"\n"
     m += f"━━━━━━━━━━━━━━━━━━━━\n"
     m += f"💼 USDT equiv: `{r['usdt_equiv']:.4f} USDT`\n"
+    m += f"\n"
 
+    # Ganancias
     if r['gan_comercial'] > 0:
-        m += f"💰 Ganancia comercial: `{r['gan_comercial']:.4f} USDT`\n"
-    if r['cpp_bs'] > 0 and r['gan_financiera'] != 0:
-        m += f"📦 CPP inventario:     `{r['cpp_bs']:.2f} Bs`\n"
-        m += f"💎 Ganancia financiera: `{r['gan_financiera']:.4f} USDT`\n"
-    if r['fee_binance'] > 0:
-        m += f"⚙️ Fee Binance: `-{r['fee_binance']:.4f} USDT`\n"
-    if r['com_corresponsal'] > 0:
-        nombre_c = r['corresponsal'].replace('_',' ')
-        m += f"🏦 Com. {nombre_c}: `-{r['com_corresponsal']:.4f} USDT`\n"
-    if r['com_referido'] > 0:
-        m += f"👥 Com. {r['nombre_referido']} ({r['pct_referido']*100:.1f}%): `-{r['com_referido']:.4f} USDT`\n"
-    if r['monto_delivery'] > 0:
-        m += f"🚚 Delivery: `{r['monto_delivery']:,.0f} COP`\n"
+        m += f"💰 Ganancia comercial:  `+{r['gan_comercial']:.4f} USDT`\n"
+    if r.get('gan_financiera', 0) > 0:
+        m += f"💎 Ganancia financiera: `+{r['gan_financiera']:.4f} USDT`\n"
+
+    # Costos
+    if r.get('fee_binance', 0) > 0:
+        m += f"⚙️ Fee Binance:         `-{r['fee_binance']:.4f} USDT`\n"
+
+    if r.get('com_corresponsal_usdt', 0) > 0:
+        titular = r.get('titular_corresp', '')
+        nombre_c = f"{r.get('tipo_corresp','')} {titular}".strip()
+        pct = r.get('com_corresp_pct', 0) * 100
+        if r['mon_salida'] == 'COP':
+            m += f"🏦 {nombre_c} ({pct:.1f}%): `-{r['com_corresponsal']:,.0f} COP` (`-{r['com_corresponsal_usdt']:.4f} USDT`)\n"
+        else:
+            m += f"🏦 {nombre_c} ({pct:.1f}%): `-{r['com_corresponsal_usdt']:.4f} USDT`\n"
+
+    if r.get('com_referido_usdt', 0) > 0:
+        pct_r = r.get('pct_referido', 0) * 100
+        if r['mon_salida'] == 'COP':
+            m += f"👥 {r['nombre_referido']} ({pct_r:.1f}%): `-{r['com_referido']:,.0f} COP` (`-{r['com_referido_usdt']:.4f} USDT`)\n"
+        else:
+            m += f"👥 {r['nombre_referido']} ({pct_r:.1f}%): `-{r['com_referido_usdt']:.4f} USDT`\n"
+
+    if r.get('delivery_activo'):
+        m += f"🚚 Delivery (cliente asume): `{fmt(r['monto_delivery'], 'COP')}`\n"
 
     m += f"━━━━━━━━━━━━━━━━━━━━\n"
-    emoji = "✅" if r['gan_neta'] > 0 else "⚠️"
-    m += f"{emoji} *Ganancia neta: `{r['gan_neta']:.4f} USDT`*\n"
 
-    if r['alertas']:
+    # Resultado con alerta
+    alerta = r.get('alerta_rentabilidad', 'OK')
+    if alerta == 'PERDIDA':
+        emoji_r = "❌"
+        sufijo = " — PÉRDIDA"
+    elif alerta == 'MUY_BAJO':
+        emoji_r = "⚠️"
+        sufijo = " — MUY BAJO"
+    elif alerta == 'BAJO':
+        emoji_r = "🟡"
+        sufijo = " — BAJO"
+    else:
+        emoji_r = "✅"
+        sufijo = ""
+
+    m += f"{emoji_r} *Ganancia neta: `{r['gan_neta']:.4f} USDT`{sufijo}*\n"
+
+    # Sugerencias si pérdida
+    if alerta == 'PERDIDA':
+        m += f"\n💡 *Para ser rentable considera:*\n"
+        if r.get('delivery_activo'):
+            m += f"   → Sin delivery: ganancia `{r['gan_neta'] + r.get('com_referido_usdt',0):.4f} USDT`\n"
+        if r.get('com_referido_usdt', 0) > 0:
+            m += f"   → Sin referido: ganancia `{r['gan_neta'] + r.get('com_referido_usdt',0):.4f} USDT`\n"
+        m += f"   → Monto mayor mejora el margen\n"
+
+    if r.get('alertas'):
         m += f"\n📌 " + " | ".join(r['alertas'])
-
-    if r['notas'] and r['notas'] != '-':
+    if r.get('notas') and r['notas'] != '-':
         m += f"\n📝 {r['notas']}"
 
     return m
 
 
 def calcular_cotizacion_v2(tipo_op, monto_entrada, cliente, metodo,
-                            corresponsal, com_corresp_pct,
+                            tipo_corresp, titular_corresp, com_corresp_pct,
                             referido, com_ref_pct,
-                            delivery, notas):
-    """Simulador v2 con comisiones separadas por campo."""
+                            delivery, monto_delivery, notas):
+    """
+    Simulador completo con:
+    - Comisiones por tipo de operación
+    - Delivery descontado del monto que recibe el cliente
+    - Alerta de rentabilidad
+    - Titular corresponsal libre
+    """
     r, error = calcular_cotizacion(tipo_op, monto_entrada, cliente, metodo,
-                                    corresponsal, 'No', referido, notas)
+                                    tipo_corresp, 'No', referido, notas)
     if error:
         return None, error
 
+    t = get_ultima_tasa()
+    trm = t.get('trm', 1) or 1
+    dol_obs = t.get('dolar_obs', 1) or 1
+
+    r['tipo_corresp'] = tipo_corresp
+    r['titular_corresp'] = titular_corresp
     r['com_corresp_pct'] = com_corresp_pct
     r['com_ref_pct'] = com_ref_pct
+    r['monto_delivery'] = float(monto_delivery) if monto_delivery else 0
+    r['delivery_activo'] = r['monto_delivery'] > 0
 
-    # Comisión corresponsal con % real ingresado
-    if corresponsal and corresponsal.lower() not in ('-','ninguno','no'):
-        r['com_corresponsal'] = round(r['usdt_equiv'] * com_corresp_pct, 4)
+    # ── DELIVERY: cliente recibe menos ──
+    monto_salida_con_delivery = r['monto_salida']
+    tasa_con_delivery = r['tasa_cliente']
+
+    if r['delivery_activo'] and r['mon_salida'] == 'COP':
+        monto_salida_con_delivery = r['monto_salida'] - r['monto_delivery']
+        tasa_con_delivery = round(monto_salida_con_delivery / monto_entrada, 4) if monto_entrada else 0
+
+    r['monto_salida_con_delivery'] = round(monto_salida_con_delivery, 2)
+    r['tasa_con_delivery'] = tasa_con_delivery
+
+    # ── COMISIÓN CORRESPONSAL ──
+    # Solo aplica si usa Bancolombia o Nequi (no Caja COP/USD)
+    usa_banco = tipo_corresp.lower() in ('bancolombia', 'nequi', 'nuevo')
+    if usa_banco and com_corresp_pct > 0:
+        # Base: monto COP que recibe el cliente
+        if r['mon_salida'] == 'COP':
+            r['com_corresponsal'] = round(r['monto_salida'] * com_corresp_pct, 2)
+            r['com_corresponsal_usdt'] = round(r['com_corresponsal'] / trm, 4) if trm else 0
+        else:
+            r['com_corresponsal'] = round(r['usdt_equiv'] * com_corresp_pct, 4)
+            r['com_corresponsal_usdt'] = r['com_corresponsal']
     else:
         r['com_corresponsal'] = 0
+        r['com_corresponsal_usdt'] = 0
 
-    # Comisión referido con % real ingresado
-    if referido and referido.lower() not in ('-','no','ninguno'):
+    # ── COMISIÓN REFERIDO ──
+    # Reglas automáticas por tipo:
+    # CLP→COP: 3% sobre monto COP
+    # COP→COP (Western): 1.5% sobre monto COP
+    # Otros: % libre ingresado
+    if referido and referido.lower() not in ('no', '-', 'ninguno'):
         r['nombre_referido'] = referido
         r['pct_referido'] = com_ref_pct
-        r['com_referido'] = round(r['usdt_equiv'] * com_ref_pct, 4)
+
+        if r['mon_salida'] == 'COP':
+            base_ref = r['monto_salida']  # monto COP que recibe el cliente
+            r['com_referido'] = round(base_ref * com_ref_pct, 2)
+            r['com_referido_usdt'] = round(r['com_referido'] / trm, 4) if trm else 0
+        else:
+            r['com_referido'] = round(r['usdt_equiv'] * com_ref_pct, 4)
+            r['com_referido_usdt'] = r['com_referido']
     else:
         r['com_referido'] = 0
+        r['com_referido_usdt'] = 0
         r['nombre_referido'] = ''
         r['pct_referido'] = 0
 
-    # Delivery en COP
-    r['monto_delivery'] = float(delivery) if delivery else 0
-
-    # Ganancia neta final
-    r['gan_neta'] = round(
-        r['gan_comercial']
-        + r['gan_financiera']
-        - r['com_corresponsal']
-        - r['com_referido']
-        - r['fee_binance'],
-        4
+    # ── GANANCIA NETA REAL ──
+    gan_bruta = r['gan_comercial'] + r['gan_financiera']
+    total_costos_usdt = (
+        r['com_corresponsal_usdt'] +
+        r['com_referido_usdt'] +
+        r['fee_binance']
     )
+    r['total_costos_usdt'] = round(total_costos_usdt, 4)
+    r['gan_neta'] = round(gan_bruta - total_costos_usdt, 4)
+
+    # ── ALERTA DE RENTABILIDAD ──
+    if r['gan_neta'] < 0:
+        r['alerta_rentabilidad'] = 'PERDIDA'
+    elif r['gan_neta'] < 1:
+        r['alerta_rentabilidad'] = 'MUY_BAJO'
+    elif r['gan_neta'] < 2:
+        r['alerta_rentabilidad'] = 'BAJO'
+    else:
+        r['alerta_rentabilidad'] = 'OK'
+
     return r, None
+
 
 def segundos_hasta_proximo_en_punto():
     """Calcula segundos hasta el próximo :00 o :30."""
