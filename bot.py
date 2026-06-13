@@ -2534,7 +2534,7 @@ def procesar(chat_id, texto):
 
                 tipo_raw = campos.get('TIPO','').upper().replace('-','→').replace(' ','')
                 tipo_op = tipo_raw
-                for t in TIPOS_OPERACION_VALIDOS:
+                for t in TIPOS_OP:
                     if tipo_raw.replace('→','') == t.replace('→',''):
                         tipo_op = t; break
 
@@ -2554,7 +2554,7 @@ def procesar(chat_id, texto):
                 monto_delivery = float(campos.get('MONTO_DELIVERY','0').replace(',','')) if delivery.lower() == 'sí' or delivery.lower() == 'si' else 0
                 notas = campos.get('NOTAS','-')
 
-                if tipo_op not in TIPOS_OPERACION_VALIDOS:
+                if tipo_op not in TIPOS_OP:
                     send(chat_id, f"❌ Tipo no válido: `{tipo_op}`\nUsa /simular para ver los tipos")
                 else:
                     resultado, error = calcular_cotizacion_v2(
