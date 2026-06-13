@@ -2520,37 +2520,54 @@ def procesar(chat_id, texto):
 
     # ── SIMULAR ──
     elif cmd in ('/simular', '/sim'):
-        texto_completo = texto.strip()
-        if cmd == '/simular' or '|' not in texto_completo:
+        # Detectar si es plantilla multilínea o comando directo
+        lineas = texto.strip().split('\n')
+        if len(lineas) <= 1:
+            # Sin parámetros → mostrar plantilla
             send(chat_id, msg_simular_ayuda())
         else:
             try:
-                sin_cmd = texto_completo[len(cmd):].strip()
-                campos = [c.strip() for c in sin_cmd.split('|')]
-                tipo_raw = campos[0].upper().replace(' ','')
+                # Parsear formato multilínea CAMPO: VALOR
+                campos = {}
+                for linea in lineas[1:]:  # skip primera línea con /sim
+                    linea = linea.strip()
+                    if ':' in linea:
+                        k, v = linea.split(':', 1)
+                        campos[k.strip().upper().replace('-','_')] = v.strip()
+
+                tipo_raw = campos.get('TIPO','').upper().replace('-','→').replace(' ','')
+                # Normalizar tipo
                 tipo_op = tipo_raw
                 for t in TIPOS_OPERACION_VALIDOS:
-                    if tipo_raw.replace('→','').replace('-','') == t.replace('→',''):
+                    if tipo_raw.replace('→','') == t.replace('→',''):
                         tipo_op = t; break
-                monto = float(campos[1].replace(',','')) if len(campos)>1 else 0
-                cliente = campos[2] if len(campos)>2 else 'Cliente'
-                metodo = campos[3] if len(campos)>3 else 'Transferencia'
-                corresponsal = campos[4] if len(campos)>4 else 'Ninguno'
-                delivery = campos[5] if len(campos)>5 else 'No'
-                referido = campos[6] if len(campos)>6 else 'No'
-                notas = campos[7] if len(campos)>7 else '-'
+
+                monto = float(campos.get('MONTO','0').replace('.','').replace(',',''))
+                cliente = campos.get('CLIENTE','Cliente')
+                metodo = campos.get('METODO','Transferencia')
+                corresponsal = campos.get('CORRESPONSAL','Ninguno')
+                com_corresp = float(campos.get('COM_CORRESPONSAL','2.5').replace('%','')) / 100
+                referido = campos.get('REFERIDO','No')
+                com_ref_pct = float(campos.get('COM_REFERIDO','0').replace('%','')) / 100
+                delivery = float(campos.get('DELIVERY','0').replace(',','').replace('.','',campos.get('DELIVERY','0').count('.')-1) if campos.get('DELIVERY','0').count('.') > 1 else campos.get('DELIVERY','0').replace(',',''))
+                notas = campos.get('NOTAS','-')
+
                 if tipo_op not in TIPOS_OPERACION_VALIDOS:
-                    send(chat_id, f"❌ Tipo no válido: `{tipo_op}`\n\n{msg_simular_ayuda()}")
+                    send(chat_id, f"❌ Tipo no válido: `{tipo_op}`\nUsa /simular para ver los tipos disponibles")
                 else:
-                    resultado, error = calcular_cotizacion(
+                    resultado, error = calcular_cotizacion_v2(
                         tipo_op, monto, cliente, metodo,
-                        corresponsal, delivery, referido, notas)
+                        corresponsal, com_corresp,
+                        referido, com_ref_pct,
+                        delivery, notas)
                     if error:
                         send(chat_id, f"⚠️ {error}")
                     else:
                         send(chat_id, msg_cotizacion(resultado))
             except Exception as e:
-                send(chat_id, f"❌ Error: {e}\nUso: /sim CLP→BS | 500000 | Juan | Transferencia | Bancolombia_C1 | No | No | -")
+                send(chat_id, f"❌ Error al procesar: {e}\nUsa /simular para ver el formato correcto")
+
+
     elif cmd=='/sim':
         if len(partes) >= 3:
             try:
@@ -4962,31 +4979,38 @@ def calcular_simulacion(tipo_op, monto, cliente, corresponsal, t):
     return res
 
 def msg_simular_ayuda():
-    """Plantilla del simulador — un solo mensaje."""
-    m = "💱 *SIMULADOR DE COTIZACIÓN*\n"
+    """Plantilla del simulador — formato limpio multilínea."""
+    m  = "💱 *SIMULADOR DE COTIZACIÓN*\n"
     m += "━━━━━━━━━━━━━━━━━━━━\n\n"
     m += "Copia, completa y envía:\n\n"
-    m += "`/sim TIPO | MONTO | CLIENTE | MÉTODO | CORRESPONSAL | DELIVERY | REFERIDO | NOTAS`\n\n"
-    m += "*Ejemplo:*\n"
-    m += "`/sim CLP→BS | 500000 | Juan Pérez | Transferencia | Bancolombia_C1 | No | Si:Pedro:1.5 | -`\n\n"
-    m += "*Campos:*\n"
-    m += "`1. TIPO`  → CLP→BS, BS→CLP, CLP→COP, COP→CLP\n"
-    m += "             COP→BS, BS→COP, CLP→USDT, USDT→CLP\n"
-    m += "             BS→USDT, USDT→BS, CLP→USD, USD→CLP\n"
-    m += "             BS→USD, USD→BS, COP→USD, USD→COP\n"
-    m += "             COP→USDT, USDT→COP, BS→USDC\n"
-    m += "             USDC→BS, USDC→USDT, USDT→USDC\n\n"
-    m += "`2. MONTO`  → monto que entrega el cliente\n"
-    m += "`3. CLIENTE` → nombre del cliente\n"
-    m += "`4. MÉTODO`  → Transferencia / Efectivo / PagoMovil\n"
-    m += "`5. CORRESPONSAL` → Bancolombia_C1, Bancolombia_C2\n"
-    m += "                    Nequi_C1, Nequi_C2, Nequi_C3\n"
-    m += "                    Orlando, Ninguno\n"
-    m += "                    Nuevo:NombreTitular (registra nuevo)\n"
-    m += "`6. DELIVERY` → No / Si:MONTO_COP\n"
-    m += "`7. REFERIDO` → No / Si:Nombre:PORCENTAJE\n"
-    m += "`8. NOTAS`    → observaciones o -\n"
+    m += "`/sim`\n"
+    m += "`TIPO: CLP-BS`\n"
+    m += "`MONTO: 500000`\n"
+    m += "`CLIENTE: Nombre Cliente`\n"
+    m += "`METODO: Transferencia`\n"
+    m += "`CORRESPONSAL: Bancolombia-C1`\n"
+    m += "`COM-CORRESPONSAL: 2.5`\n"
+    m += "`REFERIDO: No`\n"
+    m += "`COM-REFERIDO: 0`\n"
+    m += "`DELIVERY: 0`\n"
+    m += "`NOTAS: -`\n\n"
+    m += "*Tipos disponibles:*\n"
+    m += "`CLP-BS  BS-CLP  CLP-COP  COP-CLP`\n"
+    m += "`COP-BS  BS-COP  CLP-USDT USDT-CLP`\n"
+    m += "`BS-USDT USDT-BS CLP-USD  USD-CLP`\n"
+    m += "`BS-USD  USD-BS  COP-USD  USD-COP`\n"
+    m += "`COP-USDT USDT-COP BS-USDC USDC-BS`\n"
+    m += "`USDC-USDT USDT-USDC`\n\n"
+    m += "*Corresponsales:*\n"
+    m += "`Bancolombia-C1  Bancolombia-C2`\n"
+    m += "`Nequi-C1  Nequi-C2  Nequi-C3`\n"
+    m += "`Orlando  Ninguno  Nuevo:NombreTitular`\n\n"
+    m += "*Método:* Transferencia / Efectivo / PagoMovil\n"
+    m += "*Delivery:* monto en COP o 0\n"
+    m += "*Referido:* nombre o No\n"
+    m += "*Com-Referido:* % de comisión o 0"
     return m
+
 
 def calcular_cotizacion(tipo_op, monto_entrada, cliente, metodo, corresponsal, delivery, referido, notas):
     """Calcula cotización completa incluyendo CPP, corresponsal, referido y delivery."""
@@ -5310,6 +5334,50 @@ def msg_cotizacion(r):
         m += f"\n📝 {r['notas']}"
 
     return m
+
+
+def calcular_cotizacion_v2(tipo_op, monto_entrada, cliente, metodo,
+                            corresponsal, com_corresp_pct,
+                            referido, com_ref_pct,
+                            delivery, notas):
+    """Simulador v2 con comisiones separadas por campo."""
+    r, error = calcular_cotizacion(tipo_op, monto_entrada, cliente, metodo,
+                                    corresponsal, 'No', referido, notas)
+    if error:
+        return None, error
+
+    r['com_corresp_pct'] = com_corresp_pct
+    r['com_ref_pct'] = com_ref_pct
+
+    # Comisión corresponsal con % real ingresado
+    if corresponsal and corresponsal.lower() not in ('-','ninguno','no'):
+        r['com_corresponsal'] = round(r['usdt_equiv'] * com_corresp_pct, 4)
+    else:
+        r['com_corresponsal'] = 0
+
+    # Comisión referido con % real ingresado
+    if referido and referido.lower() not in ('-','no','ninguno'):
+        r['nombre_referido'] = referido
+        r['pct_referido'] = com_ref_pct
+        r['com_referido'] = round(r['usdt_equiv'] * com_ref_pct, 4)
+    else:
+        r['com_referido'] = 0
+        r['nombre_referido'] = ''
+        r['pct_referido'] = 0
+
+    # Delivery en COP
+    r['monto_delivery'] = float(delivery) if delivery else 0
+
+    # Ganancia neta final
+    r['gan_neta'] = round(
+        r['gan_comercial']
+        + r['gan_financiera']
+        - r['com_corresponsal']
+        - r['com_referido']
+        - r['fee_binance'],
+        4
+    )
+    return r, None
 
 def segundos_hasta_proximo_en_punto():
     """Calcula segundos hasta el próximo :00 o :30."""
