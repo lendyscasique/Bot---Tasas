@@ -2450,6 +2450,7 @@ ultimo_datos={}
 ultimo_precio_bs_venta=0
 ultimo_precio_clp=0
 esperando_importar={}
+pendiente_saldo_binance={}  # {chat_id: resultado_relacion_diaria}
 
 def procesar(chat_id, texto):
     global western_rate, ultimo_datos
@@ -2485,6 +2486,44 @@ def procesar(chat_id, texto):
                 send(chat_id,f"✅ Western: `{western_rate}` — Recordatorio cancelado para hoy.")
             except: send(chat_id,"Uso: /western 0.0042")
         else: send(chat_id,"Uso: `/western 0.0042`")
+
+    elif cmd=='/saldo_binance':
+        if len(partes) >= 2:
+            try:
+                saldo_real = float(partes[1].replace(',','.'))
+                # Verificar si hay un resultado pendiente
+                if chat_id in pendiente_saldo_binance:
+                    resultado = pendiente_saldo_binance[chat_id]
+                    saldos_aux = resultado.get('saldos_cierre', {})
+                    saldo_ini_usdt = resultado.get('saldo_inicial_usdt', 0)
+                    saldo_calc = calcular_saldo_cierre_binance(saldo_ini_usdt, saldos_aux)
+                    diff = saldo_real - saldo_calc
+                    signo = '+' if diff > 0 else ''
+                    m = f"🔐 *USDT BINANCE — Comparativa*\n"
+                    m += f"Calculado (C2C): `{saldo_calc:,.4f} USDT`\n"
+                    m += f"Real (app):      `{saldo_real:,.4f} USDT`\n"
+                    m += f"━━━━━━━━━━━━━━━━━━━━\n"
+                    if abs(diff) < 0.01:
+                        m += f"✅ *Cuadra perfectamente*"
+                    elif diff > 0:
+                        m += f"❌ Diferencia: `{signo}{diff:,.4f} USDT`\n"
+                        m += f"_→ Faltan órdenes en el C2C del auxiliar Binance_\n"
+                        m += f"_→ Descarga el historial completo y agrega las órdenes faltantes_"
+                    else:
+                        m += f"❌ Diferencia: `{diff:,.4f} USDT`\n"
+                        m += f"_→ Hay órdenes en el C2C que no corresponden a este día_"
+                    send(chat_id, m)
+                    # Guardar saldo real en el resultado
+                    resultado['saldo_real_binance'] = saldo_real
+                    pendiente_saldo_binance[chat_id] = resultado
+                else:
+                    # Sin contexto previo, solo mostrar la comparativa simple
+                    send(chat_id, f"✅ Saldo Binance registrado: `{saldo_real:,.4f} USDT`\n"
+                                  f"_Sube la Relación Diaria primero para ver la comparativa completa._")
+            except ValueError:
+                send(chat_id, "❌ Uso: `/saldo_binance 11.18`")
+        else:
+            send(chat_id, "❌ Uso: /saldo_binance 11.18\n_Ingresa el saldo USDT que ves en la app de Binance._")
 
     elif cmd=='/limites':
         t=ultimo_datos or {}
@@ -3272,59 +3311,79 @@ def calcular_saldo_cierre_binance(saldo_inicial_usdt, saldos_aux):
     return round(saldo_inicial_usdt + compras - ventas, 6)
 
 
-def formatear_saldos_cierre(saldos_aux, saldo_inicial_usdt=0):
-    """Formatea los saldos de cierre para mostrar en Telegram."""
+def formatear_saldos_cierre(saldos_aux, saldo_inicial_usdt=0, saldos_reales=None):
+    """
+    Formatea los saldos de cierre con comparativa vs saldo real.
+    saldos_reales: dict opcional {cuenta: saldo_real} ingresado por el usuario
+    """
     m = "\n📊 *SALDOS DE CIERRE DEL DÍA*\n"
     m += "━━━━━━━━━━━━━━━━━━━━\n"
 
-    emojis = {
-        'BS_BANESCO':    '🏦',
-        'BS_MERCANTIL':  '🏦',
-        'CLP_COPEC_PAY': '💳',
-        'USDT_BINANCE':  '🔐',
-        'USDC_AIRTM':    '💵',
-    }
-    monedas = {
-        'BS_BANESCO':    'Bs',
-        'BS_MERCANTIL':  'Bs',
-        'CLP_COPEC_PAY': 'CLP',
-        'USDT_BINANCE':  'USDT',
-        'USDC_AIRTM':    'USDC',
+    cuentas_config = {
+        'BS_BANESCO':    ('🏦', 'Bs',   '#,##0.00'),
+        'BS_MERCANTIL':  ('🏦', 'Bs',   '#,##0.00'),
+        'CLP_COPEC_PAY': ('💳', 'CLP',  '#,##0.00'),
+        'USDT_BINANCE':  ('🔐', 'USDT', '#,##0.4f'),
+        'USDC_AIRTM':    ('💵', 'USDC', '#,##0.4f'),
     }
 
-    for cuenta, data in saldos_aux.items():
-        emoji = emojis.get(cuenta, '💰')
-        moneda = monedas.get(cuenta, '')
+    saldos_reales = saldos_reales or {}
+
+    for cuenta, (emoji, moneda, _) in cuentas_config.items():
+        data = saldos_aux.get(cuenta, {})
         error = data.get('error')
 
         if error:
             m += f"{emoji} `{cuenta}`: ⚠️ {error}\n"
             continue
 
-        saldo = data.get('saldo')
-
-        # Para Binance calculamos el saldo real acumulado
+        # Calcular saldo calculado
         if cuenta == 'USDT_BINANCE':
-            saldo_final = calcular_saldo_cierre_binance(saldo_inicial_usdt, saldos_aux)
+            saldo_calc = calcular_saldo_cierre_binance(saldo_inicial_usdt, saldos_aux)
             compras = data.get('compras', 0) or 0
             ventas  = data.get('ventas', 0) or 0
-            m += f"{emoji} `{cuenta}`\n"
-            m += f"   Inicial:  `{saldo_inicial_usdt:,.4f} USDT`\n"
-            m += f"   Compras: +`{compras:,.4f} USDT`\n"
-            m += f"   Ventas:  -`{ventas:,.4f} USDT`\n"
-            m += f"   *Cierre:  `{saldo_final:,.4f} USDT`*\n"
-        elif saldo is not None:
-            filas = data.get('filas', 0)
-            m += f"{emoji} `{cuenta}`: *`{saldo:,.2f} {moneda}`*"
-            if filas > 0:
-                m += f" _({filas} movs.)_"
-            m += "\n"
+            m += f"{emoji} *{cuenta}*\n"
+            m += f"   Inicial:    `{saldo_inicial_usdt:,.4f} USDT`\n"
+            m += f"   Compras:   +`{compras:,.4f} USDT`\n"
+            m += f"   Ventas:    -`{ventas:,.4f} USDT`\n"
+            m += f"   Calculado:  `{saldo_calc:,.4f} USDT`\n"
         else:
-            m += f"{emoji} `{cuenta}`: ⚪ Sin movimientos este día\n"
+            saldo_calc = data.get('saldo')
+            filas = data.get('filas', 0)
+            if saldo_calc is not None:
+                m += f"{emoji} *{cuenta}*: `{saldo_calc:,.2f} {moneda}`"
+                if filas > 0:
+                    m += f" _({filas} movs.)_"
+                m += "\n"
+            else:
+                m += f"{emoji} *{cuenta}*: ⚪ Sin movimientos\n"
+                continue
+
+        # Mostrar diferencia si hay saldo real
+        if cuenta in saldos_reales and saldo_calc is not None:
+            saldo_real = saldos_reales[cuenta]
+            diff = saldo_real - saldo_calc
+            if abs(diff) < 0.01:
+                m += f"   ✅ Cuadra con el banco\n"
+            else:
+                signo = '+' if diff > 0 else ''
+                if cuenta == 'USDT_BINANCE':
+                    m += f"   Real Binance: `{saldo_real:,.4f} USDT`\n"
+                    m += f"   ❌ Diferencia: `{signo}{diff:,.4f} USDT`\n"
+                    if diff > 0:
+                        m += f"   _→ Faltan órdenes en el C2C_\n"
+                    else:
+                        m += f"   _→ Hay órdenes de más en el C2C_\n"
+                else:
+                    m += f"   Real banco: `{saldo_real:,.2f} {moneda}`\n"
+                    m += f"   ❌ Diferencia: `{signo}{diff:,.2f} {moneda}`\n"
+        elif cuenta == 'USDT_BINANCE' and cuenta not in saldos_reales:
+            m += f"   _⚠️ Usa /saldo_binance {{monto}} para comparar_\n"
+
+        m += "\n"
 
     m += "━━━━━━━━━━━━━━━━━━━━\n"
-    m += "_💡 Estos son los saldos reales según auxiliares bancarios._\n"
-    m += "_Compáralos con el banco para confirmar conciliación._"
+    m += "_💡 Saldos según auxiliares bancarios._"
     return m
 
 def importar_relacion_diaria(ruta_archivo, chat_id):
@@ -3948,6 +4007,9 @@ def procesar_documento(chat_id, file_id, nombre):
             except Exception as _se:
                 resultado['advertencias'].append(f"Supabase: {_se}")
             send(chat_id, formatear_resultado_relacion_diaria(resultado, guardado))
+            # Guardar para consulta posterior de saldo Binance
+            if resultado.get('saldos_cierre'):
+                pendiente_saldo_binance[chat_id] = resultado
         else:
             resultado = importar_c2c_inteligente(ruta_tmp, DB_PATH, str(chat_id))
             send(chat_id, formatear_resultado_inteligente(resultado))
