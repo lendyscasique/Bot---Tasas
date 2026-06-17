@@ -3062,6 +3062,527 @@ def procesar(chat_id, texto):
     elif hay_conv_activa(chat_id):
         send(chat_id, procesar_conv(chat_id, texto))
 
+
+# ══════════════════════════════════════════════════════════════════════
+# IMPORTADOR RELACIÓN DIARIA GSA v1.0
+# ══════════════════════════════════════════════════════════════════════
+def importar_relacion_diaria(ruta_archivo, chat_id):
+    """
+    Lee el archivo GSA_Relacion_Diaria y procesa:
+    1. SALDOS_INICIALES → carga saldos en SQLite y Supabase
+    2. OPERACIONES → registra en SQLite y Supabase
+    3. CXC → registra pendientes
+    4. CXP → registra pendientes
+    5. ORLANDO → registra reporte
+    6. BANCOLOMBIA 6.1 y 6.2 → registra reporte
+    """
+    from openpyxl import load_workbook
+    import re
+    from datetime import datetime
+
+    resultado = {
+        'fecha_hoja': None,
+        'saldos': [],
+        'cxc_mes_anterior': [],
+        'cxp_mes_anterior': [],
+        'operaciones': [],
+        'cxc_dia': [],
+        'cxp_dia': [],
+        'orlando': [],
+        'bancolombia_61': [],
+        'bancolombia_62': [],
+        'saldo_cierre_orlando': {},
+        'saldo_cierre_bc61': {},
+        'saldo_cierre_bc62': {},
+        'errores': [],
+        'advertencias': [],
+    }
+
+    def safe_float(v):
+        if v is None: return 0.0
+        try: return float(str(v).replace(',','').strip())
+        except: return 0.0
+
+    def safe_str(v):
+        if v is None: return ''
+        return str(v).strip()
+
+    try:
+        wb = load_workbook(ruta_archivo, data_only=True)
+    except Exception as e:
+        resultado['errores'].append(f"No pude abrir el archivo: {e}")
+        return resultado
+
+    # ── Detectar hoja diaria (formato DDMMYYYY) ──
+    hoja_dia = None
+    for sh in wb.sheetnames:
+        if re.match(r'^\d{8}$', sh):
+            hoja_dia = sh
+            try:
+                resultado['fecha_hoja'] = datetime.strptime(sh, '%d%m%Y').strftime('%Y-%m-%d')
+            except:
+                resultado['errores'].append(f"Formato de hoja inválido: {sh}")
+            break
+
+    if not hoja_dia:
+        resultado['errores'].append("No encontré hoja diaria (formato DDMMYYYY)")
+        return resultado
+
+    # ══════════════════════════════════════════════════
+    # 1. SALDOS_INICIALES
+    # ══════════════════════════════════════════════════
+    if 'SALDOS_INICIALES' in wb.sheetnames:
+        ws_si = wb['SALDOS_INICIALES']
+
+        # Sección 1 — Saldos de cuentas (filas 7-14)
+        for row in ws_si.iter_rows(min_row=7, max_row=14, values_only=True):
+            cuenta = safe_str(row[1])  # Col B
+            moneda = safe_str(row[2])  # Col C
+            saldo  = safe_float(row[3]) # Col D
+            if cuenta and moneda:
+                resultado['saldos'].append({
+                    'cuenta': cuenta,
+                    'moneda': moneda,
+                    'saldo': saldo
+                })
+
+        # Sección 2 — CXC mes anterior (filas 19-29)
+        for row in ws_si.iter_rows(min_row=19, max_row=29, values_only=True):
+            cliente = safe_str(row[1])
+            if not cliente or cliente in ('CLIENTE',): continue
+            resultado['cxc_mes_anterior'].append({
+                'cliente':  cliente,
+                'concepto': safe_str(row[2]),
+                'monto':    safe_float(row[3]),
+                'moneda':   safe_str(row[4]),
+                'status':   safe_str(row[6]),
+            })
+
+        # Sección 3 — CXP mes anterior (filas 32-42)
+        for row in ws_si.iter_rows(min_row=32, max_row=42, values_only=True):
+            acreedor = safe_str(row[1])
+            if not acreedor or acreedor in ('ACREEDOR',): continue
+            resultado['cxp_mes_anterior'].append({
+                'acreedor': acreedor,
+                'concepto': safe_str(row[2]),
+                'monto':    safe_float(row[3]),
+                'moneda':   safe_str(row[4]),
+                'status':   safe_str(row[6]),
+            })
+    else:
+        resultado['advertencias'].append("No encontré hoja SALDOS_INICIALES")
+
+    # ══════════════════════════════════════════════════
+    # 2. HOJA DIARIA
+    # ══════════════════════════════════════════════════
+    ws = wb[hoja_dia]
+
+    # ── Operaciones (filas 7-18, cols B-Z) ──
+    for row in ws.iter_rows(min_row=7, max_row=18, values_only=True):
+        tipo_op = safe_str(row[3])  # Col D
+        if not tipo_op or tipo_op in ('TIPO_OP',): continue
+        cliente = safe_str(row[8])  # Col I
+        if not cliente: continue
+
+        # Resolver ID (puede ser fórmula =B7+1)
+        id_op = row[1]
+        if isinstance(id_op, str) and id_op.startswith('='): id_op = None
+
+        op = {
+            'id':           id_op,
+            'fecha':        resultado['fecha_hoja'],
+            'tipo_op':      tipo_op,
+            'mon_ent':      safe_str(row[4]),   # E
+            'mon_sal':      safe_str(row[5]),   # F
+            'emisor':       safe_str(row[6]),   # G
+            'receptor':     safe_str(row[7]),   # H
+            'cliente':      cliente,
+            'tasa':         safe_float(row[9]), # J
+            'metodo_pago':  safe_str(row[10]),  # K
+            'forma_entrega':safe_str(row[11]),  # L
+            'monto_ent':    safe_float(row[12]),# M
+            'monto_sal':    safe_float(row[13]),# N
+            'tipo_corresp': safe_str(row[14]),  # O
+            'titular_corresp': safe_str(row[15]),# P
+            'com_corresp':  safe_float(row[16]),# Q
+            'referido':     safe_str(row[17]),  # R
+            'delivery':     safe_str(row[18]),  # S
+            'titular_delivery': safe_str(row[19]),# T
+            'monto_delivery': safe_float(row[20]),# U
+            'cxc_pendiente': safe_float(row[21]),# V
+            'cxp_pendiente': safe_float(row[22]),# W
+            'status':       safe_str(row[23]),  # X
+            'observaciones':safe_str(row[24]),  # Y
+            'validado':     safe_str(row[25]),  # Z
+        }
+        resultado['operaciones'].append(op)
+
+    # ── CXC del día (filas 21-27) ──
+    for row in ws.iter_rows(min_row=21, max_row=27, values_only=True):
+        cliente = safe_str(row[1])  # B
+        if not cliente or cliente in ('CLIENTE',): continue
+        resultado['cxc_dia'].append({
+            'cliente':  cliente,
+            'concepto': safe_str(row[2]),
+            'monto':    safe_float(row[3]),
+            'moneda':   safe_str(row[4]),
+            'status':   safe_str(row[5]),
+        })
+
+    # ── CXP del día (filas 32-38) ──
+    for row in ws.iter_rows(min_row=32, max_row=38, values_only=True):
+        acreedor = safe_str(row[1])  # B
+        if not acreedor or acreedor in ('CLIENTE', 'ACREEDOR'): continue
+        resultado['cxp_dia'].append({
+            'acreedor': acreedor,
+            'concepto': safe_str(row[2]),
+            'monto':    safe_float(row[3]),
+            'moneda':   safe_str(row[4]),
+            'status':   safe_str(row[5]),
+        })
+
+    # ── Caja Orlando (filas 41-50) ──
+    for row in ws.iter_rows(min_row=41, max_row=50, values_only=True):
+        cliente = safe_str(row[1])
+        tipo    = safe_str(row[2])
+        if not cliente or not tipo: continue
+        resultado['orlando'].append({
+            'cliente':      cliente,
+            'tipo':         tipo,
+            'monto':        safe_float(row[3]),
+            'moneda':       safe_str(row[4]),
+            'vinculado_a':  safe_str(row[5]),
+            'observaciones':safe_str(row[6]),
+        })
+
+    # Saldo cierre Orlando (fila 52)
+    resultado['saldo_cierre_orlando'] = {
+        'COP': safe_float(ws.cell(row=52, column=4).value),
+        'USD': safe_float(ws.cell(row=52, column=5).value),
+    }
+
+    # ── Bancolombia 6.1 (filas 56-63) ──
+    for row in ws.iter_rows(min_row=56, max_row=63, values_only=True):
+        cliente = safe_str(row[1])
+        tipo    = safe_str(row[2])
+        if not cliente or not tipo: continue
+        resultado['bancolombia_61'].append({
+            'cliente':      cliente,
+            'tipo':         tipo,
+            'medio':        safe_str(row[3]),
+            'monto':        safe_float(row[4]),
+            'moneda':       safe_str(row[5]),
+            'vinculado_a':  safe_str(row[6]),
+            'observaciones':safe_str(row[7]),
+        })
+
+    resultado['saldo_cierre_bc61'] = {
+        'COP': safe_float(ws.cell(row=65, column=4).value),
+    }
+
+    # ── Bancolombia 6.2 (filas 69-76) ──
+    for row in ws.iter_rows(min_row=69, max_row=76, values_only=True):
+        cliente = safe_str(row[1])
+        tipo    = safe_str(row[2])
+        if not cliente or not tipo: continue
+        resultado['bancolombia_62'].append({
+            'cliente':      cliente,
+            'tipo':         tipo,
+            'medio':        safe_str(row[3]),
+            'monto':        safe_float(row[4]),
+            'moneda':       safe_str(row[5]),
+            'vinculado_a':  safe_str(row[6]),
+            'observaciones':safe_str(row[7]),
+        })
+
+    resultado['saldo_cierre_bc62'] = {
+        'COP': safe_float(ws.cell(row=78, column=4).value),
+    }
+
+    return resultado
+
+
+
+def _sync_relacion_diaria_supabase(resultado, usuario):
+    """Sincroniza la relación diaria con Supabase."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    import requests, json
+    headers = {
+        'apikey': SUPABASE_KEY,
+        'Authorization': f'Bearer {SUPABASE_KEY}',
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates'
+    }
+    fecha = resultado.get('fecha_hoja', '')
+
+    # Upsert operaciones
+    ops = resultado.get('operaciones', [])
+    if ops:
+        payload = []
+        for op in ops:
+            payload.append({
+                'fecha': fecha,
+                'tipo_op': op['tipo_op'],
+                'mon_ent': op['mon_ent'],
+                'mon_sal': op['mon_sal'],
+                'emisor': op['emisor'],
+                'receptor': op['receptor'],
+                'cliente': op['cliente'],
+                'tasa': op['tasa'],
+                'monto_ent': op['monto_ent'],
+                'monto_sal': op['monto_sal'],
+                'tipo_corresp': op['tipo_corresp'],
+                'titular_corresp': op['titular_corresp'],
+                'referido': op['referido'],
+                'status': op['status'],
+                'observaciones': op['observaciones'],
+                'usuario': usuario,
+            })
+        try:
+            requests.post(
+                f"{SUPABASE_URL}/rest/v1/gsa_operaciones",
+                headers=headers, data=json.dumps(payload), timeout=10
+            )
+        except: pass
+
+    # Upsert saldos
+    saldos = resultado.get('saldos', [])
+    if saldos:
+        payload = [{'cuenta': s['cuenta'], 'saldo': s['saldo'],
+                    'moneda': s['moneda'], 'fecha': fecha} for s in saldos]
+        try:
+            requests.post(
+                f"{SUPABASE_URL}/rest/v1/saldos_iniciales",
+                headers=headers, data=json.dumps(payload), timeout=10
+            )
+        except: pass
+
+def guardar_relacion_diaria(resultado, chat_id):
+    """Guarda el resultado del importador en SQLite y Supabase."""
+    import sqlite3
+    from datetime import datetime
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    fecha = resultado.get('fecha_hoja') or datetime.now().strftime('%Y-%m-%d')
+    guardado = {'saldos':0,'operaciones':0,'cxc':0,'cxp':0,'orlando':0,'bancolombia':0}
+
+    # ── Crear tablas si no existen ──
+    conn.execute("""CREATE TABLE IF NOT EXISTS gsa_operaciones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT, tipo_op TEXT, mon_ent TEXT, mon_sal TEXT,
+        emisor TEXT, receptor TEXT, cliente TEXT, tasa REAL,
+        monto_ent REAL, monto_sal REAL, tipo_corresp TEXT,
+        titular_corresp TEXT, com_corresp REAL, referido TEXT,
+        delivery TEXT, monto_delivery REAL,
+        cxc_pendiente REAL, cxp_pendiente REAL,
+        status TEXT, observaciones TEXT, validado TEXT,
+        metodo_pago TEXT, forma_entrega TEXT,
+        importado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+        usuario TEXT)""")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS gsa_cxc (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT, cliente TEXT, concepto TEXT,
+        monto REAL, moneda TEXT, status TEXT,
+        origen TEXT, importado_en DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS gsa_cxp (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT, acreedor TEXT, concepto TEXT,
+        monto REAL, moneda TEXT, status TEXT,
+        origen TEXT, importado_en DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS gsa_orlando (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT, cliente TEXT, tipo TEXT,
+        monto REAL, moneda TEXT, vinculado_a TEXT,
+        observaciones TEXT, importado_en DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS gsa_bancolombia (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT, titular TEXT, cliente TEXT, tipo TEXT,
+        medio TEXT, monto REAL, moneda TEXT,
+        vinculado_a TEXT, observaciones TEXT,
+        importado_en DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS gsa_saldos_cierre (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT, cuenta TEXT, monto REAL, moneda TEXT,
+        importado_en DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+
+    conn.commit()
+
+    # ── Saldos iniciales ──
+    for s in resultado.get('saldos', []):
+        conn.execute("""INSERT OR REPLACE INTO saldos_iniciales (cuenta, saldo, fecha)
+            VALUES (?,?,?)""", (s['cuenta'], s['saldo'], fecha))
+        guardado['saldos'] += 1
+
+    # ── Operaciones ──
+    for op in resultado.get('operaciones', []):
+        # Verificar si ya existe (por fecha + cliente + tipo + monto)
+        existe = conn.execute("""SELECT id FROM gsa_operaciones
+            WHERE fecha=? AND cliente=? AND tipo_op=? AND monto_ent=? AND monto_sal=?""",
+            (op['fecha'], op['cliente'], op['tipo_op'],
+             op['monto_ent'], op['monto_sal'])).fetchone()
+        if not existe:
+            conn.execute("""INSERT INTO gsa_operaciones
+                (fecha,tipo_op,mon_ent,mon_sal,emisor,receptor,cliente,tasa,
+                 monto_ent,monto_sal,tipo_corresp,titular_corresp,com_corresp,
+                 referido,delivery,monto_delivery,cxc_pendiente,cxp_pendiente,
+                 status,observaciones,validado,metodo_pago,forma_entrega,usuario)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (op['fecha'],op['tipo_op'],op['mon_ent'],op['mon_sal'],
+                 op['emisor'],op['receptor'],op['cliente'],op['tasa'],
+                 op['monto_ent'],op['monto_sal'],op['tipo_corresp'],
+                 op['titular_corresp'],op['com_corresp'],op['referido'],
+                 op['delivery'],op['monto_delivery'],op['cxc_pendiente'],
+                 op['cxp_pendiente'],op['status'],op['observaciones'],
+                 op['validado'],op['metodo_pago'],op['forma_entrega'],
+                 str(chat_id)))
+            guardado['operaciones'] += 1
+
+    # ── CXC (día + mes anterior) ──
+    todas_cxc = (
+        [(c, 'mes_anterior') for c in resultado.get('cxc_mes_anterior', [])] +
+        [(c, 'dia') for c in resultado.get('cxc_dia', [])]
+    )
+    for cxc, origen in todas_cxc:
+        cliente  = cxc.get('cliente','')
+        concepto = cxc.get('concepto','')
+        monto    = cxc.get('monto', 0)
+        moneda   = cxc.get('moneda','')
+        status   = cxc.get('status','Pendiente')
+        if not cliente: continue
+        existe = conn.execute("""SELECT id FROM gsa_cxc
+            WHERE fecha=? AND cliente=? AND monto=? AND moneda=?""",
+            (fecha, cliente, monto, moneda)).fetchone()
+        if not existe:
+            conn.execute("""INSERT INTO gsa_cxc
+                (fecha,cliente,concepto,monto,moneda,status,origen)
+                VALUES (?,?,?,?,?,?,?)""",
+                (fecha, cliente, concepto, monto, moneda, status, origen))
+            guardado['cxc'] += 1
+
+    # ── CXP (día + mes anterior) ──
+    todas_cxp = (
+        [(c, 'mes_anterior') for c in resultado.get('cxp_mes_anterior', [])] +
+        [(c, 'dia') for c in resultado.get('cxp_dia', [])]
+    )
+    for cxp, origen in todas_cxp:
+        acreedor = cxp.get('acreedor','')
+        concepto = cxp.get('concepto','')
+        monto    = cxp.get('monto', 0)
+        moneda   = cxp.get('moneda','')
+        status   = cxp.get('status','Pendiente')
+        if not acreedor: continue
+        existe = conn.execute("""SELECT id FROM gsa_cxp
+            WHERE fecha=? AND acreedor=? AND monto=? AND moneda=?""",
+            (fecha, acreedor, monto, moneda)).fetchone()
+        if not existe:
+            conn.execute("""INSERT INTO gsa_cxp
+                (fecha,acreedor,concepto,monto,moneda,status,origen)
+                VALUES (?,?,?,?,?,?,?)""",
+                (fecha, acreedor, concepto, monto, moneda, status, origen))
+            guardado['cxp'] += 1
+
+    # ── Orlando ──
+    for mov in resultado.get('orlando', []):
+        conn.execute("""INSERT INTO gsa_orlando
+            (fecha,cliente,tipo,monto,moneda,vinculado_a,observaciones)
+            VALUES (?,?,?,?,?,?,?)""",
+            (fecha, mov['cliente'], mov['tipo'], mov['monto'],
+             mov['moneda'], mov['vinculado_a'], mov['observaciones']))
+        guardado['orlando'] += 1
+
+    # Saldo cierre Orlando
+    sc_orl = resultado.get('saldo_cierre_orlando', {})
+    for mon, monto in sc_orl.items():
+        if monto:
+            conn.execute("""INSERT INTO gsa_saldos_cierre (fecha,cuenta,monto,moneda)
+                VALUES (?,?,?,?)""", (fecha, 'CAJA_ORLANDO', monto, mon))
+
+    # ── Bancolombia ──
+    for titular, movs in [('Jesus_Orlando', resultado.get('bancolombia_61',[])),
+                           ('Nataly_Florez',  resultado.get('bancolombia_62',[]))]:
+        for mov in movs:
+            conn.execute("""INSERT INTO gsa_bancolombia
+                (fecha,titular,cliente,tipo,medio,monto,moneda,vinculado_a,observaciones)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (fecha, titular, mov['cliente'], mov['tipo'], mov['medio'],
+                 mov['monto'], mov['moneda'], mov['vinculado_a'], mov['observaciones']))
+            guardado['bancolombia'] += 1
+
+    # Saldo cierre Bancolombia
+    for titular, sc in [('BC_61_Jesus', resultado.get('saldo_cierre_bc61',{})),
+                         ('BC_62_Nataly', resultado.get('saldo_cierre_bc62',{}))]:
+        for mon, monto in sc.items():
+            if monto:
+                conn.execute("""INSERT INTO gsa_saldos_cierre (fecha,cuenta,monto,moneda)
+                    VALUES (?,?,?,?)""", (fecha, titular, monto, mon))
+
+    conn.commit()
+    conn.close()
+    return guardado
+
+
+def formatear_resultado_relacion_diaria(resultado, guardado):
+    """Formatea el resumen del procesamiento para Telegram."""
+    fecha = resultado.get('fecha_hoja', '?')
+    errores = resultado.get('errores', [])
+    advertencias = resultado.get('advertencias', [])
+
+    if errores:
+        return f"❌ *Error procesando el archivo:*\n" + "\n".join(f"• {e}" for e in errores)
+
+    m = f"✅ *RELACIÓN DIARIA PROCESADA*\n"
+    m += f"📅 Fecha: `{fecha}`\n"
+    m += "━━━━━━━━━━━━━━━━━━━━\n"
+
+    m += f"🏦 *Saldos iniciales:* {guardado['saldos']} cuentas\n"
+    m += f"📋 *Operaciones:* {guardado['operaciones']} registradas\n"
+    m += f"📥 *CXC:* {guardado['cxc']} cuentas por cobrar\n"
+    m += f"📤 *CXP:* {guardado['cxp']} cuentas por pagar\n"
+    m += f"💵 *Caja Orlando:* {guardado['orlando']} movimientos\n"
+    m += f"🏛️ *Bancolombia:* {guardado['bancolombia']} movimientos\n"
+    m += "━━━━━━━━━━━━━━━━━━━━\n"
+
+    # Resumen operaciones
+    ops = resultado.get('operaciones', [])
+    if ops:
+        completadas = sum(1 for o in ops if o['status'] == 'Completada')
+        pendientes  = sum(1 for o in ops if 'Pendiente' in o['status'])
+        m += f"\n📊 *Operaciones del día:*\n"
+        m += f"  ✅ Completadas: {completadas}\n"
+        if pendientes:
+            m += f"  ⚠️ Pendientes: {pendientes}\n"
+
+    # CXC pendientes
+    cxc_pend = [c for c in resultado.get('cxc_dia', []) + resultado.get('cxc_mes_anterior', [])
+                if c.get('status') == 'Pendiente']
+    if cxc_pend:
+        m += f"\n📥 *CXC Pendientes:*\n"
+        for c in cxc_pend[:5]:
+            m += f"  • {c['cliente']}: `{c['monto']:,.2f} {c['moneda']}`\n"
+
+    # CXP pendientes
+    cxp_pend = [c for c in resultado.get('cxp_dia', []) + resultado.get('cxp_mes_anterior', [])
+                if c.get('status') == 'Pendiente']
+    if cxp_pend:
+        m += f"\n📤 *CXP Pendientes:*\n"
+        for c in cxp_pend[:5]:
+            m += f"  • {c['acreedor']}: `{c['monto']:,.2f} {c['moneda']}`\n"
+
+    if advertencias:
+        m += f"\n⚠️ *Advertencias:*\n"
+        m += "\n".join(f"  • {a}" for a in advertencias)
+
+    m += f"\n\n💾 _Datos guardados en Supabase_"
+    return m
+
+
 # ══════════════════════════════════════════════════════════════════════
 # PROCESADOR DE DOCUMENTOS
 # ══════════════════════════════════════════════════════════════════════
@@ -3101,8 +3622,31 @@ def procesar_documento(chat_id, file_id, nombre):
             tmp.write(contenido); ruta_tmp = tmp.name
 
     try:
-        resultado = importar_c2c_inteligente(ruta_tmp, DB_PATH, str(chat_id))
-        send(chat_id, formatear_resultado_inteligente(resultado))
+        # Detectar tipo de archivo
+        from openpyxl import load_workbook as _lw2
+        import re as _re
+        _wb2 = _lw2(ruta_tmp, read_only=True)
+        _hojas = _wb2.sheetnames
+        _wb2.close()
+
+        es_relacion_diaria = (
+            'SALDOS_INICIALES' in _hojas or
+            any(_re.match(r'^\d{8}$', h) for h in _hojas)
+        )
+
+        if es_relacion_diaria:
+            resultado = importar_relacion_diaria(ruta_tmp, chat_id)
+            guardado  = guardar_relacion_diaria(resultado, chat_id)
+            # Sincronizar con Supabase
+            try:
+                _sync_relacion_diaria_supabase(resultado, str(chat_id))
+            except Exception as _se:
+                resultado['advertencias'].append(f"Supabase: {_se}")
+            send(chat_id, formatear_resultado_relacion_diaria(resultado, guardado))
+        else:
+            resultado = importar_c2c_inteligente(ruta_tmp, DB_PATH, str(chat_id))
+            send(chat_id, formatear_resultado_inteligente(resultado))
+
     except Exception as e:
         import traceback
         send(chat_id, f"❌ Error: `{e}`\n```{traceback.format_exc()[-300:]}```")
@@ -4794,12 +5338,15 @@ def calcular_simulacion(tipo_op, monto, cliente, corresponsal, t):
             if not limite_bs_cop: res['error'] = 'Sin datos BS/COP'; res['ok'] = False; return res
             res['mon_entrada'] = 'COP'
             res['mon_salida'] = 'BS'
+            tasa_tramo = tasa_cop_bs_por_tramo(monto, tasa_gsa_cop_bs)
             res['tasa_limite'] = tasa_gsa_cop_bs
-            res['tasa_cliente'] = tasa_gsa_cop_bs
+            res['tasa_cliente'] = tasa_tramo
             res['tasa_referencia'] = limite_bs_cop
-            res['monto_salida'] = round(monto * tasa_gsa_cop_bs, 2)
+            res['tramo'] = label_tramo_cop_bs(monto)
+            res['monto_salida'] = round(monto / tasa_tramo, 2)
             res['usdt_equiv'] = round(monto / trm, 4)
-            res['gan_comercial'] = round(res['usdt_equiv'] * 0.055, 4)
+            gan_pct = (tasa_tramo - limite_bs_cop) / tasa_tramo if tasa_tramo else 0
+            res['gan_comercial'] = round(res['usdt_equiv'] * abs(gan_pct), 4)
 
         elif tipo_op == 'CLP→USDT':
             precio_clp = t.get('clp_compra', 0) or dol_obs
@@ -5025,6 +5572,29 @@ def msg_simular_ayuda():
     return m
 
 
+
+def tasa_cop_bs_por_tramo(monto_cop, tasa_base):
+    """Retorna la tasa COP→BS según el tramo de monto."""
+    if monto_cop <= 100000:
+        return round(tasa_base, 4)           # Tramo 1: tasa estándar
+    elif monto_cop <= 499999:
+        # Tramo 2: mejor para el cliente (tasa más baja = menos Bs por COP)
+        factor = 4.4800 / 4.5711
+        return round(tasa_base * factor, 4)
+    else:
+        # Tramo 3: más competitivo
+        factor = 4.4000 / 4.5711
+        return round(tasa_base * factor, 4)
+
+def label_tramo_cop_bs(monto_cop):
+    """Retorna la etiqueta del tramo aplicado."""
+    if monto_cop <= 100000:
+        return "Tramo 1 (0 - 100,000 COP)"
+    elif monto_cop <= 499999:
+        return "Tramo 2 (100,001 - 499,999 COP)"
+    else:
+        return "Tramo 3 (500,000 COP en adelante)"
+
 def calcular_cotizacion(tipo_op, monto_entrada, cliente, metodo, corresponsal, delivery, referido, notas):
     """Calcula cotización completa incluyendo CPP, corresponsal, referido y delivery."""
     t = get_ultima_tasa()
@@ -5111,13 +5681,15 @@ def calcular_cotizacion(tipo_op, monto_entrada, cliente, metodo, corresponsal, d
         r['gan_comercial']=round(r['usdt_equiv']*0.055,4)
 
     elif tipo_op == 'COP→BS':
+        tasa_tramo = tasa_cop_bs_por_tramo(monto_entrada, tasa_gsa_cop_bs)
         r['mon_entrada']='COP'; r['mon_salida']='BS'
-        r['tasa_limite']=round(1/limite_bs_cop,6) if limite_bs_cop else 0
-        r['tasa_cliente']=round(tasa_gsa_cop_bs,6)
-        r['monto_salida']=round(monto_entrada*tasa_gsa_cop_bs,2)
+        r['tasa_limite']=round(tasa_gsa_cop_bs,4)
+        r['tasa_cliente']=round(tasa_tramo,4)
+        r['tramo']=label_tramo_cop_bs(monto_entrada)
+        r['monto_salida']=round(monto_entrada/tasa_tramo,2) if tasa_tramo else 0
         r['usdt_equiv']=round(monto_entrada/trm,4)
-        r['gan_comercial']=round(r['usdt_equiv']*0.055,4)
-
+        gan_pct=(tasa_tramo-limite_bs_cop)/tasa_tramo if tasa_tramo else 0
+        r['gan_comercial']=round(r['usdt_equiv']*abs(gan_pct),4)
     elif tipo_op == 'CLP→USDT':
         precio = ban_clp_compra or dol_obs
         r['mon_entrada']='CLP'; r['mon_salida']='USDT'
@@ -5329,10 +5901,13 @@ def msg_cotizacion(r):
     m += f"\n"
     m += f"📥 Entrega: `{fmt(r['monto_entrada'], r['mon_entrada'])}`\n"
 
+    # Mostrar tramo si aplica
+    # Mostrar tramo si aplica
+    if r.get('tramo'):
+        m += f"📊 *{r['tramo']}*\n"
     if r.get('delivery_activo') and mon_s == 'COP':
         m += f"📤 Recibe:  `{fmt(r['monto_salida_con_delivery'], mon_s)}`\n"
         m += f"   _({fmt(r['monto_salida'], mon_s)} − {fmt(r['monto_delivery'], 'COP')} delivery)_\n"
-    else:
         m += f"📤 Recibe:  `{fmt(r['monto_salida'], mon_s)}`\n"
 
     m += f"\n"
