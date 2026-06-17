@@ -3066,6 +3066,267 @@ def procesar(chat_id, texto):
 # ══════════════════════════════════════════════════════════════════════
 # IMPORTADOR RELACIÓN DIARIA GSA v1.0
 # ══════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════
+# LECTOR DE SALDOS AUXILIARES
+# ══════════════════════════════════════════════════════════════════════
+def leer_saldos_auxiliares(ruta_archivo, fecha_hoja):
+    """
+    Lee los saldos de cierre del día desde los auxiliares bancarios.
+    
+    BANESCO/MERCANTIL: Última fila donde Col B = fecha → Col F = saldo
+    COPEC: Última fila donde Col B = fecha → Col F = saldo
+    AIRTM: Fila de totales generales → Col O = USDC neto
+    BINANCE: Suma compras - ventas donde fecha = fecha_hoja
+    
+    Retorna dict con saldos de cierre por cuenta.
+    """
+    from openpyxl import load_workbook
+    from datetime import datetime, date
+    import re
+
+    def safe_float(v):
+        if v is None: return 0.0
+        try: return float(str(v).replace(',','').strip())
+        except: return 0.0
+
+    def es_fecha(v, fecha_obj):
+        """Verifica si el valor de celda corresponde a la fecha buscada."""
+        if v is None: return False
+        if isinstance(v, datetime):
+            return v.date() == fecha_obj
+        if isinstance(v, date):
+            return v == fecha_obj
+        try:
+            return datetime.strptime(str(v)[:10], '%Y-%m-%d').date() == fecha_obj
+        except:
+            return False
+
+    saldos = {
+        'BS_BANESCO':    {'saldo': None, 'filas': 0, 'error': None},
+        'BS_MERCANTIL':  {'saldo': None, 'filas': 0, 'error': None},
+        'CLP_COPEC_PAY': {'saldo': None, 'filas': 0, 'error': None},
+        'USDT_BINANCE':  {'saldo': None, 'filas': 0, 'error': None},
+        'USDC_AIRTM':    {'saldo': None, 'filas': 0, 'error': None},
+    }
+
+    try:
+        wb = load_workbook(ruta_archivo, data_only=True)
+    except Exception as e:
+        for k in saldos:
+            saldos[k]['error'] = f"No pude abrir archivo: {e}"
+        return saldos
+
+    # Parsear fecha
+    try:
+        if isinstance(fecha_hoja, str):
+            fecha_obj = datetime.strptime(fecha_hoja, '%Y-%m-%d').date()
+        else:
+            fecha_obj = fecha_hoja
+    except:
+        for k in saldos:
+            saldos[k]['error'] = "Fecha inválida"
+        return saldos
+
+    # ── BANESCO ──
+    hojas_banesco = ['Banco Banesco', 'BANCO BANESCO', 'Banesco', 'banesco']
+    for nombre in hojas_banesco:
+        if nombre in wb.sheetnames:
+            ws = wb[nombre]
+            ultimo_saldo = None
+            filas = 0
+            for row in ws.iter_rows(min_row=11, values_only=True):
+                fecha_cel = row[1]  # Col B (índice 1)
+                saldo_cel = row[5]  # Col F (índice 5)
+                if es_fecha(fecha_cel, fecha_obj) and saldo_cel is not None:
+                    ultimo_saldo = safe_float(saldo_cel)
+                    filas += 1
+            saldos['BS_BANESCO']['saldo'] = ultimo_saldo
+            saldos['BS_BANESCO']['filas'] = filas
+            break
+    else:
+        saldos['BS_BANESCO']['error'] = "Hoja Banesco no encontrada"
+
+    # ── MERCANTIL ──
+    hojas_merc = ['Banco Mercantil', 'BANCO MERCANTIL', 'Mercantil', 'mercantil']
+    for nombre in hojas_merc:
+        if nombre in wb.sheetnames:
+            ws = wb[nombre]
+            ultimo_saldo = None
+            filas = 0
+            for row in ws.iter_rows(min_row=11, values_only=True):
+                fecha_cel = row[1]  # Col B
+                saldo_cel = row[5]  # Col F
+                if es_fecha(fecha_cel, fecha_obj) and saldo_cel is not None:
+                    ultimo_saldo = safe_float(saldo_cel)
+                    filas += 1
+            saldos['BS_MERCANTIL']['saldo'] = ultimo_saldo
+            saldos['BS_MERCANTIL']['filas'] = filas
+            break
+    else:
+        saldos['BS_MERCANTIL']['error'] = "Hoja Mercantil no encontrada"
+
+    # ── COPEC ──
+    hojas_copec = ['Copec', 'COPEC', 'Copec Pay', 'copec']
+    for nombre in hojas_copec:
+        if nombre in wb.sheetnames:
+            ws = wb[nombre]
+            ultimo_saldo = None
+            filas = 0
+            for row in ws.iter_rows(min_row=11, values_only=True):
+                fecha_cel = row[1]  # Col B
+                saldo_cel = row[5]  # Col F
+                # Saltar fila de totales (col B vacía pero col D tiene SUM)
+                if fecha_cel is None: continue
+                if es_fecha(fecha_cel, fecha_obj) and saldo_cel is not None:
+                    ultimo_saldo = safe_float(saldo_cel)
+                    filas += 1
+            saldos['CLP_COPEC_PAY']['saldo'] = ultimo_saldo
+            saldos['CLP_COPEC_PAY']['filas'] = filas
+            break
+    else:
+        saldos['CLP_COPEC_PAY']['error'] = "Hoja Copec no encontrada"
+
+    # ── AIRTM ──
+    hojas_airtm = ['Airtm', 'AIRTM', 'airtm']
+    for nombre in hojas_airtm:
+        if nombre in wb.sheetnames:
+            ws = wb[nombre]
+            # Buscar fila de totales (contiene "Total" en col H)
+            usdc_neto = None
+            for row in ws.iter_rows(min_row=10, values_only=True):
+                cel_h = str(row[7] or '').lower()  # Col H
+                if 'total' in cel_h:
+                    # Col O = índice 14 = USDC Total neto
+                    usdc_neto = safe_float(row[14])
+                    break
+            # Si no encontró fila total, sumar columna O
+            if usdc_neto is None:
+                usdc_sum = 0
+                for row in ws.iter_rows(min_row=14, values_only=True):
+                    fecha_cel = row[2]  # Col C
+                    o_val = row[14]     # Col O
+                    if es_fecha(fecha_cel, fecha_obj) and o_val is not None:
+                        try: usdc_sum += float(o_val)
+                        except: pass
+                usdc_neto = usdc_sum if usdc_sum != 0 else None
+            saldos['USDC_AIRTM']['saldo'] = usdc_neto
+            break
+    else:
+        saldos['USDC_AIRTM']['error'] = "Hoja Airtm no encontrada"
+
+    # ── BINANCE ──
+    hojas_binance = ['Binance', 'BINANCE', 'binance']
+    for nombre in hojas_binance:
+        if nombre in wb.sheetnames:
+            ws = wb[nombre]
+            # Leer desde fila 18 (datos C2C)
+            # Col D = Order Type (Buy/Sell)
+            # Col I = Quantity (USDT)
+            # Col O = Created Time (fecha)
+            # Col N = Status
+            compras = 0.0
+            ventas  = 0.0
+            filas   = 0
+            for row in ws.iter_rows(min_row=18, values_only=True):
+                tipo    = str(row[3] or '').strip()   # Col D
+                qty     = row[8]                       # Col I
+                status  = str(row[13] or '').strip()  # Col N
+                fecha_s = str(row[14] or '')[:10]     # Col O (fecha)
+                
+                if not tipo or qty is None: continue
+                if 'Completed' not in status and 'completed' not in status.lower():
+                    continue
+                # Verificar fecha
+                try:
+                    f = datetime.strptime(fecha_s, '%Y-%m-%d').date()
+                    if f != fecha_obj: continue
+                except: continue
+                
+                qty_f = safe_float(qty)
+                if tipo.lower() == 'buy':
+                    compras += qty_f
+                elif tipo.lower() == 'sell':
+                    ventas += qty_f
+                filas += 1
+
+            saldos['USDT_BINANCE']['saldo'] = round(compras - ventas, 6) if filas > 0 else None
+            saldos['USDT_BINANCE']['filas'] = filas
+            # Nota: esto es el MOVIMIENTO neto del día, no el saldo acumulado
+            # El saldo real = saldo_inicial + movimiento_neto
+            saldos['USDT_BINANCE']['movimiento_neto'] = round(compras - ventas, 6)
+            saldos['USDT_BINANCE']['compras'] = round(compras, 6)
+            saldos['USDT_BINANCE']['ventas']  = round(ventas, 6)
+            break
+    else:
+        saldos['USDT_BINANCE']['error'] = "Hoja Binance no encontrada"
+
+    return saldos
+
+
+def calcular_saldo_cierre_binance(saldo_inicial_usdt, saldos_aux):
+    """Calcula saldo final USDT = inicial + compras - ventas del día."""
+    mov = saldos_aux.get('USDT_BINANCE', {})
+    compras = mov.get('compras', 0) or 0
+    ventas  = mov.get('ventas', 0) or 0
+    return round(saldo_inicial_usdt + compras - ventas, 6)
+
+
+def formatear_saldos_cierre(saldos_aux, saldo_inicial_usdt=0):
+    """Formatea los saldos de cierre para mostrar en Telegram."""
+    m = "\n📊 *SALDOS DE CIERRE DEL DÍA*\n"
+    m += "━━━━━━━━━━━━━━━━━━━━\n"
+
+    emojis = {
+        'BS_BANESCO':    '🏦',
+        'BS_MERCANTIL':  '🏦',
+        'CLP_COPEC_PAY': '💳',
+        'USDT_BINANCE':  '🔐',
+        'USDC_AIRTM':    '💵',
+    }
+    monedas = {
+        'BS_BANESCO':    'Bs',
+        'BS_MERCANTIL':  'Bs',
+        'CLP_COPEC_PAY': 'CLP',
+        'USDT_BINANCE':  'USDT',
+        'USDC_AIRTM':    'USDC',
+    }
+
+    for cuenta, data in saldos_aux.items():
+        emoji = emojis.get(cuenta, '💰')
+        moneda = monedas.get(cuenta, '')
+        error = data.get('error')
+
+        if error:
+            m += f"{emoji} `{cuenta}`: ⚠️ {error}\n"
+            continue
+
+        saldo = data.get('saldo')
+
+        # Para Binance calculamos el saldo real acumulado
+        if cuenta == 'USDT_BINANCE':
+            saldo_final = calcular_saldo_cierre_binance(saldo_inicial_usdt, saldos_aux)
+            compras = data.get('compras', 0) or 0
+            ventas  = data.get('ventas', 0) or 0
+            m += f"{emoji} `{cuenta}`\n"
+            m += f"   Inicial:  `{saldo_inicial_usdt:,.4f} USDT`\n"
+            m += f"   Compras: +`{compras:,.4f} USDT`\n"
+            m += f"   Ventas:  -`{ventas:,.4f} USDT`\n"
+            m += f"   *Cierre:  `{saldo_final:,.4f} USDT`*\n"
+        elif saldo is not None:
+            filas = data.get('filas', 0)
+            m += f"{emoji} `{cuenta}`: *`{saldo:,.2f} {moneda}`*"
+            if filas > 0:
+                m += f" _({filas} movs.)_"
+            m += "\n"
+        else:
+            m += f"{emoji} `{cuenta}`: ⚪ Sin movimientos este día\n"
+
+    m += "━━━━━━━━━━━━━━━━━━━━\n"
+    m += "_💡 Estos son los saldos reales según auxiliares bancarios._\n"
+    m += "_Compáralos con el banco para confirmar conciliación._"
+    return m
+
 def importar_relacion_diaria(ruta_archivo, chat_id):
     """
     Lee el archivo GSA_Relacion_Diaria y procesa:
@@ -3528,6 +3789,28 @@ def guardar_relacion_diaria(resultado, chat_id):
     return guardado
 
 
+def procesar_saldos_auxiliares(ruta_archivo, resultado, guardado):
+    """Lee saldos auxiliares y los agrega al resultado."""
+    fecha = resultado.get('fecha_hoja', '')
+    
+    # Obtener saldo inicial USDT de los saldos cargados
+    saldo_inicial_usdt = 0.0
+    for s in resultado.get('saldos', []):
+        if s['cuenta'] == 'USDT_BINANCE':
+            saldo_inicial_usdt = s['saldo']
+            break
+
+    saldos_aux = leer_saldos_auxiliares(ruta_archivo, fecha)
+    
+    # Calcular saldo final USDT real
+    saldo_final_usdt = calcular_saldo_cierre_binance(saldo_inicial_usdt, saldos_aux)
+    saldos_aux['USDT_BINANCE']['saldo_final'] = saldo_final_usdt
+    
+    resultado['saldos_cierre'] = saldos_aux
+    resultado['saldo_inicial_usdt'] = saldo_inicial_usdt
+    return resultado
+
+
 def formatear_resultado_relacion_diaria(resultado, guardado):
     """Formatea el resumen del procesamiento para Telegram."""
     fecha = resultado.get('fecha_hoja', '?')
@@ -3590,6 +3873,12 @@ def formatear_resultado_relacion_diaria(resultado, guardado):
         m += f"\n⚠️ *Advertencias:*\n"
         m += "\n".join(f"  • {a}" for a in advertencias)
 
+    # Saldos de cierre desde auxiliares
+    saldos_cierre = resultado.get('saldos_cierre')
+    if saldos_cierre:
+        saldo_usdt_ini = resultado.get('saldo_inicial_usdt', 0)
+        m += formatear_saldos_cierre(saldos_cierre, saldo_usdt_ini)
+
     m += f"\n\n💾 _Datos guardados en Supabase_"
     return m
 
@@ -3648,6 +3937,11 @@ def procesar_documento(chat_id, file_id, nombre):
         if es_relacion_diaria:
             resultado = importar_relacion_diaria(ruta_tmp, chat_id)
             guardado  = guardar_relacion_diaria(resultado, chat_id)
+            # Leer saldos auxiliares bancarios
+            try:
+                resultado = procesar_saldos_auxiliares(ruta_tmp, resultado, guardado)
+            except Exception as _ae:
+                resultado['advertencias'].append(f"Saldos auxiliares: {_ae}")
             # Sincronizar con Supabase
             try:
                 _sync_relacion_diaria_supabase(resultado, str(chat_id))
