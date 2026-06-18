@@ -3383,12 +3383,20 @@ def calcular_saldo_cierre_binance(saldo_inicial_usdt, saldos_aux):
     return round(saldo_inicial_usdt + compras_acum - ventas_acum, 6)
 
 
-def formatear_saldos_cierre(saldos_aux, saldo_inicial_usdt=0, saldos_reales=None):
+def formatear_saldos_cierre(saldos_aux, saldo_inicial_usdt=0, saldos_reales=None, fecha_cierre=None):
     """
     Formatea los saldos de cierre con comparativa vs saldo real.
     saldos_reales: dict opcional {cuenta: saldo_real} ingresado por el usuario
+    fecha_cierre: fecha real del cierre (puede diferir de fecha_hoja)
     """
-    m = "\n📊 *SALDOS DE CIERRE DEL DÍA*\n"
+    titulo = "SALDOS DE CIERRE DEL DÍA"
+    if fecha_cierre:
+        try:
+            from datetime import datetime as _dtt3
+            fl = _dtt3.strptime(fecha_cierre, '%Y-%m-%d').strftime('%d/%m/%Y')
+            titulo = f"SALDOS DE CIERRE — {fl}"
+        except: pass
+    m = f"\n📊 *{titulo}*\n"
     m += "━━━━━━━━━━━━━━━━━━━━\n"
 
     cuentas_config = {
@@ -3931,10 +3939,76 @@ def guardar_relacion_diaria(resultado, chat_id):
     return guardado
 
 
+def detectar_fecha_mas_reciente_auxiliares(ruta_archivo):
+    """
+    Detecta la fecha más reciente disponible en los auxiliares del Excel.
+    Revisa Binance (Col O), Banesco/Mercantil/Copec (Col B), Airtm (Col C).
+    Retorna la fecha más reciente como string 'YYYY-MM-DD' o None.
+    """
+    from openpyxl import load_workbook
+    from datetime import datetime as _dtt
+
+    try:
+        wb = load_workbook(ruta_archivo, data_only=True, read_only=True)
+    except:
+        return None
+
+    fechas_encontradas = []
+
+    def extraer_fecha(v):
+        if v is None: return None
+        from datetime import date as _date, datetime as _dtt2
+        if isinstance(v, (_dtt2, _date)):
+            return v.date() if isinstance(v, _dtt2) else v
+        try: return _dtt2.strptime(str(v)[:10], '%Y-%m-%d').date()
+        except: return None
+
+    # Binance — Col O (índice 14)
+    for nombre in ['Binance', 'BINANCE', 'binance']:
+        if nombre in wb.sheetnames:
+            ws = wb[nombre]
+            for row in ws.iter_rows(min_row=18, values_only=True):
+                status = str(row[13] or '').strip()
+                if 'Completed' not in status: continue
+                f = extraer_fecha(row[14])
+                if f: fechas_encontradas.append(f)
+            break
+
+    # Banesco / Mercantil / Copec — Col B (índice 1)
+    for nombre in ['Banco Banesco', 'Banco Mercantil', 'Copec',
+                   'BANCO BANESCO', 'BANCO MERCANTIL', 'COPEC']:
+        if nombre in wb.sheetnames:
+            ws = wb[nombre]
+            for row in ws.iter_rows(min_row=11, values_only=True):
+                f = extraer_fecha(row[1])
+                if f: fechas_encontradas.append(f)
+
+    # Airtm — Col C (índice 2)
+    for nombre in ['Airtm', 'AIRTM', 'airtm']:
+        if nombre in wb.sheetnames:
+            ws = wb[nombre]
+            for row in ws.iter_rows(min_row=14, values_only=True):
+                f = extraer_fecha(row[2])
+                if f: fechas_encontradas.append(f)
+
+    if not fechas_encontradas:
+        return None
+    return str(max(fechas_encontradas))
+
+
 def procesar_saldos_auxiliares(ruta_archivo, resultado, guardado):
-    """Lee saldos auxiliares y los agrega al resultado."""
-    fecha = resultado.get('fecha_hoja', '')
-    
+    """
+    Lee saldos auxiliares y los agrega al resultado.
+    Usa la fecha más reciente disponible en los auxiliares,
+    no solo la fecha de la hoja diaria.
+    """
+    fecha_hoja = resultado.get('fecha_hoja', '')
+
+    # Detectar fecha más reciente en los auxiliares
+    fecha_aux_reciente = detectar_fecha_mas_reciente_auxiliares(ruta_archivo)
+    fecha_calculo = fecha_aux_reciente or fecha_hoja
+    print(f"📊 fecha_hoja={fecha_hoja} | fecha_aux_reciente={fecha_aux_reciente} | usando={fecha_calculo}")
+
     # Obtener saldo inicial USDT de los saldos cargados
     saldo_inicial_usdt = 0.0
     for s in resultado.get('saldos', []):
@@ -3942,14 +4016,15 @@ def procesar_saldos_auxiliares(ruta_archivo, resultado, guardado):
             saldo_inicial_usdt = s['saldo']
             break
 
-    saldos_aux = leer_saldos_auxiliares(ruta_archivo, fecha)
-    
+    saldos_aux = leer_saldos_auxiliares(ruta_archivo, fecha_calculo)
+
     # Calcular saldo final USDT real
     saldo_final_usdt = calcular_saldo_cierre_binance(saldo_inicial_usdt, saldos_aux)
     saldos_aux['USDT_BINANCE']['saldo_final'] = saldo_final_usdt
-    
-    resultado['saldos_cierre'] = saldos_aux
+
+    resultado['saldos_cierre']      = saldos_aux
     resultado['saldo_inicial_usdt'] = saldo_inicial_usdt
+    resultado['fecha_cierre_aux']   = fecha_calculo  # puede ser distinta a fecha_hoja
     return resultado
 
 
@@ -4024,9 +4099,10 @@ def formatear_resultado_relacion_diaria_partes(resultado, guardado):
     print(f"📊 saldos_cierre presente: {saldos_cierre is not None}")
     if saldos_cierre:
         saldo_usdt_ini = resultado.get('saldo_inicial_usdt', 0)
-        print(f"📊 Generando mensaje saldos cierre...")
+        fecha_cierre_aux = resultado.get('fecha_cierre_aux', fecha)
+        print(f"📊 Generando mensaje saldos cierre para fecha {fecha_cierre_aux}...")
         try:
-            m3 = formatear_saldos_cierre(saldos_cierre, saldo_usdt_ini)
+            m3 = formatear_saldos_cierre(saldos_cierre, saldo_usdt_ini, fecha_cierre=fecha_cierre_aux)
             print(f"📊 m3 generado: {len(m3)} chars")
             print(f"📊 m3 contenido: {repr(m3[:200])}")
             if m3:
