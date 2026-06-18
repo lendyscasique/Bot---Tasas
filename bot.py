@@ -3961,21 +3961,30 @@ def formatear_resultado_relacion_diaria(resultado, guardado):
 # PROCESADOR DE DOCUMENTOS
 # ══════════════════════════════════════════════════════════════════════
 def procesar_documento(chat_id, file_id, nombre):
-    nombre_lower = nombre.lower()
-    if not (nombre_lower.endswith('.xlsx') or nombre_lower.endswith('.csv')):
-        send(chat_id, f"⚠️ Solo acepto .xlsx o .csv\nRecibí: `{nombre}`"); return
+    try:
+        print(f"📥 procesar_documento iniciado: {nombre}")
+        nombre_lower = nombre.lower()
+        if not (nombre_lower.endswith('.xlsx') or nombre_lower.endswith('.csv')):
+            send(chat_id, f"⚠️ Solo acepto .xlsx o .csv\nRecibí: `{nombre}`"); return
 
-    send(chat_id, f"⏳ Descargando y procesando `{nombre}`...\n_Esto puede tomar unos segundos._")
-    contenido = download_file(file_id)
-    if not contenido:
-        send(chat_id, "❌ No pude descargar el archivo. Intenta de nuevo."); return
-    
-    # Verificar que es un ZIP válido (xlsx)
-    if nombre_lower.endswith('.xlsx') and not contenido[:4] == b'PK\x03\x04':
-        if not contenido[:2] == b'PK':
+        send(chat_id, f"⏳ Descargando `{nombre}`...\n_Esto puede tomar unos segundos._")
+        print(f"📥 Descargando {nombre} (file_id={file_id[:20]}...)")
+        contenido = download_file(file_id)
+        print(f"📥 Descarga completada: {len(contenido) if contenido else 0} bytes")
+        if not contenido:
+            send(chat_id, "❌ No pude descargar el archivo. Intenta de nuevo."); return
+        
+        # Verificar que es un ZIP válido (xlsx)
+        print(f"📥 Verificando formato: header={contenido[:4].hex()}")
+        if nombre_lower.endswith('.xlsx') and contenido[:2] != b'PK':
             send(chat_id, "❌ El archivo parece estar corrupto o no es un .xlsx válido.\n"
                          "Guárdalo en Excel como *Libro de Excel (.xlsx)* y vuelve a enviarlo.")
             return
+    except Exception as _e_init:
+        print(f"❌ Error en inicio de procesar_documento: {_e_init}")
+        import traceback; print(traceback.format_exc())
+        send(chat_id, f"❌ Error interno: {_e_init}")
+        return
 
     import tempfile
     if nombre_lower.endswith('.csv'):
