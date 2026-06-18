@@ -3538,20 +3538,27 @@ def importar_relacion_diaria(ruta_archivo, chat_id):
         resultado['errores'].append(f"No pude abrir el archivo: {e}")
         return resultado
 
-    # ── Detectar hoja diaria (formato DDMMYYYY) ──
-    hoja_dia = None
+    # ── Detectar TODAS las hojas diarias (formato DDMMYYYY) ──
+    hojas_diarias = []
     for sh in wb.sheetnames:
         if re.match(r'^\d{8}$', sh):
-            hoja_dia = sh
             try:
-                resultado['fecha_hoja'] = datetime.strptime(sh, '%d%m%Y').strftime('%Y-%m-%d')
+                fecha_iso = datetime.strptime(sh, '%d%m%Y').strftime('%Y-%m-%d')
+                hojas_diarias.append((sh, fecha_iso))
             except:
                 resultado['errores'].append(f"Formato de hoja inválido: {sh}")
-            break
 
-    if not hoja_dia:
+    if not hojas_diarias:
         resultado['errores'].append("No encontré hoja diaria (formato DDMMYYYY)")
         return resultado
+
+    # Ordenar por fecha y usar la más reciente como fecha_hoja principal
+    hojas_diarias.sort(key=lambda x: x[1])
+    hoja_dia = hojas_diarias[-1][0]  # la más reciente
+    resultado['fecha_hoja'] = hojas_diarias[-1][1]
+    resultado['todas_hojas_diarias'] = hojas_diarias
+    print(f"📅 Hojas diarias encontradas: {[h[0] for h in hojas_diarias]}")
+    print(f"📅 Procesando operaciones de todas las hojas")
 
     # ══════════════════════════════════════════════════
     # 1. SALDOS_INICIALES
@@ -3598,133 +3605,142 @@ def importar_relacion_diaria(ruta_archivo, chat_id):
         resultado['advertencias'].append("No encontré hoja SALDOS_INICIALES")
 
     # ══════════════════════════════════════════════════
-    # 2. HOJA DIARIA
+    # 2. TODAS LAS HOJAS DIARIAS
+    # Procesa ops, CXC, CXP, Orlando y Bancolombia
+    # de CADA hoja DDMMYYYY encontrada
     # ══════════════════════════════════════════════════
-    ws = wb[hoja_dia]
+    for hoja_nombre, fecha_hoja_iso in hojas_diarias:
+        ws = wb[hoja_nombre]
+        print(f"  📋 Procesando hoja {hoja_nombre} ({fecha_hoja_iso})")
 
-    # ── Operaciones (filas 7-18, cols B-Z) ──
-    for row in ws.iter_rows(min_row=7, max_row=18, values_only=True):
-        tipo_op = safe_str(row[3])  # Col D
-        if not tipo_op or tipo_op in ('TIPO_OP',): continue
-        cliente = safe_str(row[8])  # Col I
-        if not cliente: continue
+        # ── Operaciones (filas 7-18) ──
+        for row in ws.iter_rows(min_row=7, max_row=18, values_only=True):
+            tipo_op = safe_str(row[3])  # Col D
+            if not tipo_op or tipo_op in ('TIPO_OP',): continue
+            cliente = safe_str(row[8])  # Col I
+            if not cliente: continue
 
-        # Resolver ID (puede ser fórmula =B7+1)
-        id_op = row[1]
-        if isinstance(id_op, str) and id_op.startswith('='): id_op = None
+            id_op = row[1]
+            if isinstance(id_op, str) and id_op.startswith('='): id_op = None
 
-        op = {
-            'id':           id_op,
-            'fecha':        resultado['fecha_hoja'],
-            'tipo_op':      tipo_op,
-            'mon_ent':      safe_str(row[4]),   # E
-            'mon_sal':      safe_str(row[5]),   # F
-            'emisor':       safe_str(row[6]),   # G
-            'receptor':     safe_str(row[7]),   # H
-            'cliente':      cliente,
-            'tasa':         safe_float(row[9]), # J
-            'metodo_pago':  safe_str(row[10]),  # K
-            'forma_entrega':safe_str(row[11]),  # L
-            'monto_ent':    safe_float(row[12]),# M
-            'monto_sal':    safe_float(row[13]),# N
-            'tipo_corresp': safe_str(row[14]),  # O
-            'titular_corresp': safe_str(row[15]),# P
-            'com_corresp':  safe_float(row[16]),# Q = COM CORRESP %
-            'com_corresp_monto': safe_float(row[17]),# R = COM CORRESP MONTO (calculado)
-            'referido':     safe_str(row[18]),  # S (era R)
-            'delivery':     safe_str(row[19]),  # T (era S)
-            'titular_delivery': safe_str(row[20]),# U (era T)
-            'monto_delivery': safe_float(row[21]),# V (era U)
-            'cxc_pendiente': safe_float(row[22]),# W (era V)
-            'cxp_pendiente': safe_float(row[23]),# X (era W)
-            'status':       safe_str(row[24]),  # Y (era X)
-            'observaciones':safe_str(row[25]),  # Z (era Y)
-            'validado':     safe_str(row[26]),  # AA (era Z)
-        }
-        resultado['operaciones'].append(op)
+            op = {
+                'id':                id_op,
+                'fecha':             fecha_hoja_iso,  # fecha de ESTA hoja
+                'tipo_op':           tipo_op,
+                'mon_ent':           safe_str(row[4]),    # E
+                'mon_sal':           safe_str(row[5]),    # F
+                'emisor':            safe_str(row[6]),    # G
+                'receptor':          safe_str(row[7]),    # H
+                'cliente':           cliente,
+                'tasa':              safe_float(row[9]),  # J
+                'metodo_pago':       safe_str(row[10]),   # K
+                'forma_entrega':     safe_str(row[11]),   # L
+                'monto_ent':         safe_float(row[12]), # M
+                'monto_sal':         safe_float(row[13]), # N
+                'tipo_corresp':      safe_str(row[14]),   # O
+                'titular_corresp':   safe_str(row[15]),   # P
+                'com_corresp':       safe_float(row[16]), # Q = COM CORRESP %
+                'com_corresp_monto': safe_float(row[17]), # R = COM CORRESP MONTO
+                'referido':          safe_str(row[18]),   # S
+                'delivery':          safe_str(row[19]),   # T
+                'titular_delivery':  safe_str(row[20]),   # U
+                'monto_delivery':    safe_float(row[21]), # V
+                'cxc_pendiente':     safe_float(row[22]), # W
+                'cxp_pendiente':     safe_float(row[23]), # X
+                'status':            safe_str(row[24]),   # Y
+                'observaciones':     safe_str(row[25]),   # Z
+                'validado':          safe_str(row[26]),   # AA
+            }
+            resultado['operaciones'].append(op)
 
-    # ── CXC del día (filas 21-27) ──
-    for row in ws.iter_rows(min_row=21, max_row=27, values_only=True):
-        cliente = safe_str(row[1])  # B
-        if not cliente or cliente in ('CLIENTE',): continue
-        resultado['cxc_dia'].append({
-            'cliente':  cliente,
-            'concepto': safe_str(row[2]),
-            'monto':    safe_float(row[3]),
-            'moneda':   safe_str(row[4]),
-            'status':   safe_str(row[5]),
-        })
+        # ── CXC (filas 21-27) — solo de la hoja más reciente ──
+        # (la más reciente tiene el estado actualizado de todas las CXC)
+        if hoja_nombre == hojas_diarias[-1][0]:
+            for row in ws.iter_rows(min_row=21, max_row=27, values_only=True):
+                cliente = safe_str(row[1])
+                if not cliente or cliente in ('CLIENTE',): continue
+                resultado['cxc_dia'].append({
+                    'cliente':  cliente,
+                    'concepto': safe_str(row[2]),
+                    'monto':    safe_float(row[3]),
+                    'moneda':   safe_str(row[4]),
+                    'status':   safe_str(row[5]),
+                })
 
-    # ── CXP del día (filas 32-38) ──
-    for row in ws.iter_rows(min_row=32, max_row=38, values_only=True):
-        acreedor = safe_str(row[1])  # B
-        if not acreedor or acreedor in ('CLIENTE', 'ACREEDOR'): continue
-        resultado['cxp_dia'].append({
-            'acreedor': acreedor,
-            'concepto': safe_str(row[2]),
-            'monto':    safe_float(row[3]),
-            'moneda':   safe_str(row[4]),
-            'status':   safe_str(row[5]),
-        })
+            # ── CXP (filas 32-38) ──
+            for row in ws.iter_rows(min_row=32, max_row=38, values_only=True):
+                acreedor = safe_str(row[1])
+                if not acreedor or acreedor in ('CLIENTE', 'ACREEDOR'): continue
+                resultado['cxp_dia'].append({
+                    'acreedor': acreedor,
+                    'concepto': safe_str(row[2]),
+                    'monto':    safe_float(row[3]),
+                    'moneda':   safe_str(row[4]),
+                    'status':   safe_str(row[5]),
+                })
 
-    # ── Caja Orlando (filas 41-50) ──
-    for row in ws.iter_rows(min_row=41, max_row=50, values_only=True):
-        cliente = safe_str(row[1])
-        tipo    = safe_str(row[2])
-        if not cliente or not tipo: continue
-        resultado['orlando'].append({
-            'cliente':      cliente,
-            'tipo':         tipo,
-            'monto':        safe_float(row[3]),
-            'moneda':       safe_str(row[4]),
-            'vinculado_a':  safe_str(row[5]),
-            'observaciones':safe_str(row[6]),
-        })
+        # ── Caja Orlando (filas 41-50) ──
+        for row in ws.iter_rows(min_row=41, max_row=50, values_only=True):
+            cliente = safe_str(row[1])
+            tipo    = safe_str(row[2])
+            if not cliente or not tipo: continue
+            resultado['orlando'].append({
+                'cliente':       cliente,
+                'tipo':          tipo,
+                'monto':         safe_float(row[3]),
+                'moneda':        safe_str(row[4]),
+                'vinculado_a':   safe_str(row[5]),
+                'observaciones': safe_str(row[6]),
+            })
 
-    # Saldo cierre Orlando (fila 52)
-    resultado['saldo_cierre_orlando'] = {
-        'COP': safe_float(ws.cell(row=52, column=4).value),
-        'USD': safe_float(ws.cell(row=52, column=5).value),
-    }
+        # Saldo cierre Orlando — solo de la hoja más reciente
+        if hoja_nombre == hojas_diarias[-1][0]:
+            resultado['saldo_cierre_orlando'] = {
+                'COP': safe_float(ws.cell(row=52, column=4).value),
+                'USD': safe_float(ws.cell(row=52, column=5).value),
+            }
 
-    # ── Bancolombia 6.1 (filas 56-63) ──
-    for row in ws.iter_rows(min_row=56, max_row=63, values_only=True):
-        cliente = safe_str(row[1])
-        tipo    = safe_str(row[2])
-        if not cliente or not tipo: continue
-        resultado['bancolombia_61'].append({
-            'cliente':      cliente,
-            'tipo':         tipo,
-            'medio':        safe_str(row[3]),
-            'monto':        safe_float(row[4]),
-            'moneda':       safe_str(row[5]),
-            'vinculado_a':  safe_str(row[6]),
-            'observaciones':safe_str(row[7]),
-        })
+        # ── Bancolombia 6.1 (filas 56-63) ──
+        for row in ws.iter_rows(min_row=56, max_row=63, values_only=True):
+            cliente = safe_str(row[1])
+            tipo    = safe_str(row[2])
+            if not cliente or not tipo: continue
+            resultado['bancolombia_61'].append({
+                'cliente':       cliente,
+                'tipo':          tipo,
+                'medio':         safe_str(row[3]),
+                'monto':         safe_float(row[4]),
+                'moneda':        safe_str(row[5]),
+                'vinculado_a':   safe_str(row[6]),
+                'observaciones': safe_str(row[7]),
+            })
 
-    resultado['saldo_cierre_bc61'] = {
-        'COP': safe_float(ws.cell(row=65, column=4).value),
-    }
+        if hoja_nombre == hojas_diarias[-1][0]:
+            resultado['saldo_cierre_bc61'] = {
+                'COP': safe_float(ws.cell(row=65, column=4).value),
+            }
 
-    # ── Bancolombia 6.2 (filas 69-76) ──
-    for row in ws.iter_rows(min_row=69, max_row=76, values_only=True):
-        cliente = safe_str(row[1])
-        tipo    = safe_str(row[2])
-        if not cliente or not tipo: continue
-        resultado['bancolombia_62'].append({
-            'cliente':      cliente,
-            'tipo':         tipo,
-            'medio':        safe_str(row[3]),
-            'monto':        safe_float(row[4]),
-            'moneda':       safe_str(row[5]),
-            'vinculado_a':  safe_str(row[6]),
-            'observaciones':safe_str(row[7]),
-        })
+        # ── Bancolombia 6.2 (filas 69-76) ──
+        for row in ws.iter_rows(min_row=69, max_row=76, values_only=True):
+            cliente = safe_str(row[1])
+            tipo    = safe_str(row[2])
+            if not cliente or not tipo: continue
+            resultado['bancolombia_62'].append({
+                'cliente':       cliente,
+                'tipo':          tipo,
+                'medio':         safe_str(row[3]),
+                'monto':         safe_float(row[4]),
+                'moneda':        safe_str(row[5]),
+                'vinculado_a':   safe_str(row[6]),
+                'observaciones': safe_str(row[7]),
+            })
 
-    resultado['saldo_cierre_bc62'] = {
-        'COP': safe_float(ws.cell(row=78, column=4).value),
-    }
+        if hoja_nombre == hojas_diarias[-1][0]:
+            resultado['saldo_cierre_bc62'] = {
+                'COP': safe_float(ws.cell(row=78, column=4).value),
+            }
 
+    print(f"  📊 Total operaciones procesadas: {len(resultado['operaciones'])}")
     return resultado
 
 
