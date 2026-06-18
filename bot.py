@@ -3960,6 +3960,7 @@ def formatear_resultado_relacion_diaria_partes(resultado, guardado):
         try:
             m3 = formatear_saldos_cierre(saldos_cierre, saldo_usdt_ini)
             print(f"📊 m3 generado: {len(m3)} chars")
+            print(f"📊 m3 contenido: {repr(m3[:200])}")
             if m3:
                 msgs.append(m3)
         except Exception as _e3:
@@ -4149,9 +4150,22 @@ def procesar_documento(chat_id, file_id, nombre):
             try:
                 msgs = formatear_resultado_relacion_diaria_partes(resultado, guardado)
                 for i, msg in enumerate(msgs):
-                    send(chat_id, msg)
-                    print(f"📥 Mensaje {i+1}/{len(msgs)} enviado")
-                    import time; time.sleep(0.3)
+                    # Último mensaje sin markdown por si tiene chars especiales
+                    if i == len(msgs) - 1:
+                        try:
+                            import requests as _rq
+                            _rq.post(f"{BASE_URL}/sendMessage", json={
+                                "chat_id": chat_id,
+                                "text": msg,
+                                "parse_mode": None
+                            }, timeout=10)
+                            print(f"📥 Mensaje {i+1}/{len(msgs)} enviado (sin markdown)")
+                        except Exception as _se:
+                            print(f"❌ Error enviando msg {i+1}: {_se}")
+                    else:
+                        send(chat_id, msg)
+                        print(f"📥 Mensaje {i+1}/{len(msgs)} enviado")
+                    import time; time.sleep(0.5)
             except Exception as _me:
                 print(f"❌ Error enviando: {_me}")
                 send(chat_id, f"✅ Relación Diaria procesada: {guardado['operaciones']} ops, {guardado['cxc']} CXC, {guardado['cxp']} CXP")
