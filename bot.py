@@ -3615,16 +3615,17 @@ def importar_relacion_diaria(ruta_archivo, chat_id):
             'monto_sal':    safe_float(row[13]),# N
             'tipo_corresp': safe_str(row[14]),  # O
             'titular_corresp': safe_str(row[15]),# P
-            'com_corresp':  safe_float(row[16]),# Q
-            'referido':     safe_str(row[17]),  # R
-            'delivery':     safe_str(row[18]),  # S
-            'titular_delivery': safe_str(row[19]),# T
-            'monto_delivery': safe_float(row[20]),# U
-            'cxc_pendiente': safe_float(row[21]),# V
-            'cxp_pendiente': safe_float(row[22]),# W
-            'status':       safe_str(row[23]),  # X
-            'observaciones':safe_str(row[24]),  # Y
-            'validado':     safe_str(row[25]),  # Z
+            'com_corresp':  safe_float(row[16]),# Q = COM CORRESP %
+            'com_corresp_monto': safe_float(row[17]),# R = COM CORRESP MONTO (calculado)
+            'referido':     safe_str(row[18]),  # S (era R)
+            'delivery':     safe_str(row[19]),  # T (era S)
+            'titular_delivery': safe_str(row[20]),# U (era T)
+            'monto_delivery': safe_float(row[21]),# V (era U)
+            'cxc_pendiente': safe_float(row[22]),# W (era V)
+            'cxp_pendiente': safe_float(row[23]),# X (era W)
+            'status':       safe_str(row[24]),  # Y (era X)
+            'observaciones':safe_str(row[25]),  # Z (era Y)
+            'validado':     safe_str(row[26]),  # AA (era Z)
         }
         resultado['operaciones'].append(op)
 
