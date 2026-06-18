@@ -392,6 +392,214 @@ def gs_escribir_stock(op):
     except Exception as e:
         print(f"❌ gs_escribir_stock: {e}")
 
+
+def gs_sync_inicial():
+    """
+    Sincronización inicial: vuelca todos los datos de Supabase
+    hacia Google Sheets. Llamar una vez con /gssync.
+    """
+    if not USE_GOOGLE_SHEETS:
+        return "❌ Google Sheets no configurado."
+
+    reporte = []
+
+    try:
+        # ── 1. TASAS — última tasa disponible ──
+        t = get_ultima_tasa()
+        if t:
+            gs_escribir_tasas(t)
+            reporte.append("✅ TASAS actualizada")
+        else:
+            reporte.append("⚠️ Sin tasas en DB")
+
+        # ── 2. SALDOS → APERTURA ──
+        conn = get_conn()
+        saldos_ini = conn.execute(
+            "SELECT cuenta, saldo FROM saldos_iniciales"
+        ).fetchall()
+        conn.close()
+        if saldos_ini:
+            saldos_lista = [{'cuenta': r['cuenta'], 'saldo': r['saldo']} for r in saldos_ini]
+            gs_escribir_apertura(saldos_lista)
+            reporte.append(f"✅ APERTURA: {len(saldos_lista)} cuentas")
+        else:
+            reporte.append("⚠️ Sin saldos iniciales en DB")
+
+        # ── 3. OPERACIONES + STOCK → desde gsa_operaciones ──
+        conn = get_conn()
+        ops = conn.execute("""
+            SELECT * FROM gsa_operaciones
+            ORDER BY fecha, rowid
+        """).fetchall()
+        conn.close()
+
+        if ops:
+            # Limpiar hoja OPERACIONES antes de escribir
+            gs_clear("OPERACIONES!A5:Z500")
+            gs_clear("STOCK!A24:J600")
+
+            filas_ops = []
+            for op in ops:
+                op = dict(op)
+                fila = [
+                    op.get('rowid',''),
+                    op.get('fecha',''),
+                    op.get('cliente',''),
+                    op.get('referido',''),
+                    op.get('tipo_op',''),
+                    op.get('mon_ent',''),
+                    op.get('mon_sal',''),
+                    op.get('monto_ent', 0),
+                    op.get('monto_sal', 0),
+                    op.get('tasa', 0),
+                    '',  # tasa_ref
+                    '',  # usdt_equiv
+                    '',  # diferencial
+                    op.get('metodo_pago',''),
+                    op.get('tipo_corresp',''),
+                    op.get('titular_corresp',''),
+                    op.get('com_corresp', 0),
+                    op.get('forma_entrega',''),
+                    op.get('delivery',''),
+                    op.get('titular_delivery',''),
+                    op.get('monto_delivery', 0),
+                    op.get('emisor',''),
+                    op.get('receptor',''),
+                    op.get('status',''),
+                    op.get('observaciones',''),
+                ]
+                filas_ops.append(fila)
+
+                # Stock: movimiento de moneda entrada (salida de caja)
+                if op.get('mon_ent') and op.get('monto_ent', 0) > 0:
+                    gs_append("STOCK!A24", [[
+                        op.get('rowid',''), op.get('fecha',''),
+                        op.get('tipo_op',''), op.get('mon_ent',''),
+                        f"{op.get('tipo_op','')} — {op.get('cliente','')}",
+                        '', op.get('monto_ent', 0), '', op.get('tasa', 0),
+                        'Relación Diaria',
+                    ]])
+
+                # Stock: movimiento de moneda salida (entrada a caja o salida)
+                if op.get('mon_sal') and op.get('monto_sal', 0) > 0:
+                    emisor = op.get('emisor','')
+                    receptor = op.get('receptor','')
+                    es_entrada = receptor in ('CLP_COPEC_PAY','BS_BANESCO',
+                                              'BS_MERCANTIL','USDT_BINANCE','USDC_AIRTM')
+                    es_salida  = emisor in ('CLP_COPEC_PAY','BS_BANESCO',
+                                            'BS_MERCANTIL','USDT_BINANCE','USDC_AIRTM')
+                    if es_entrada:
+                        gs_append("STOCK!A24", [[
+                            op.get('rowid',''), op.get('fecha',''),
+                            op.get('tipo_op',''), op.get('mon_sal',''),
+                            f"{op.get('tipo_op','')} — {op.get('cliente','')}",
+                            op.get('monto_sal', 0), '', '', op.get('tasa', 0),
+                            'Relación Diaria',
+                        ]])
+                    elif es_salida:
+                        gs_append("STOCK!A24", [[
+                            op.get('rowid',''), op.get('fecha',''),
+                            op.get('tipo_op',''), op.get('mon_sal',''),
+                            f"{op.get('tipo_op','')} — {op.get('cliente','')}",
+                            '', op.get('monto_sal', 0), '', op.get('tasa', 0),
+                            'Relación Diaria',
+                        ]])
+
+            # Escribir todas las ops de una vez
+            if filas_ops:
+                gs_write("OPERACIONES!A5", filas_ops)
+            reporte.append(f"✅ OPERACIONES: {len(ops)} registros")
+            reporte.append(f"✅ STOCK: movimientos escritos")
+        else:
+            reporte.append("⚠️ Sin operaciones en DB — sube la Relación Diaria primero")
+
+        # ── 4. CXC desde gsa_cxc ──
+        conn = get_conn()
+        cxc_rows = conn.execute("""
+            SELECT cliente, concepto, monto, moneda, status
+            FROM gsa_cxc WHERE status='Pendiente'
+            ORDER BY fecha DESC
+        """).fetchall()
+        conn.close()
+
+        if cxc_rows:
+            gs_clear("CXC!A5:J200")
+            ahora_str = now_local().strftime("%d/%m/%Y")
+            filas_cxc = [[
+                ahora_str, r['cliente'], r['concepto'],
+                r['monto'], r['moneda'], '', '', '🟡 Esta semana',
+                r['status'], ''
+            ] for r in cxc_rows]
+            gs_write("CXC!A5", filas_cxc)
+            reporte.append(f"✅ CXC: {len(cxc_rows)} pendientes")
+        else:
+            reporte.append("⚠️ Sin CXC pendientes")
+
+        # ── 5. CXP desde gsa_cxp ──
+        conn = get_conn()
+        cxp_rows = conn.execute("""
+            SELECT acreedor, concepto, monto, moneda, status
+            FROM gsa_cxp WHERE status='Pendiente'
+            ORDER BY fecha DESC
+        """).fetchall()
+        conn.close()
+
+        if cxp_rows:
+            gs_clear("CXP!A5:J200")
+            ahora_str = now_local().strftime("%d/%m/%Y")
+            filas_cxp = [[
+                ahora_str, r['acreedor'], r['concepto'],
+                r['monto'], r['moneda'], '', '', '🟡 Esta semana',
+                r['status'], ''
+            ] for r in cxp_rows]
+            gs_write("CXP!A5", filas_cxp)
+            reporte.append(f"✅ CXP: {len(cxp_rows)} pendientes")
+        else:
+            reporte.append("⚠️ Sin CXP pendientes")
+
+        # ── 6. GASTOS desde gastos ──
+        conn = get_conn()
+        gastos = conn.execute("""
+            SELECT fecha, categoria, descripcion, monto, moneda, comprobante
+            FROM gastos ORDER BY fecha
+        """).fetchall()
+        conn.close()
+
+        if gastos:
+            gs_clear("GASTOS!A6:H300")
+            filas_g = [[
+                r['fecha'], r['categoria'], r['descripcion'],
+                r['monto'], r['moneda'], '', r['comprobante'] or '', ''
+            ] for r in gastos]
+            gs_write("GASTOS!A6", filas_g)
+            reporte.append(f"✅ GASTOS: {len(gastos)} registros")
+
+        # ── 7. CLIENTES ──
+        conn = get_conn()
+        clientes = conn.execute("""
+            SELECT nombre, telefono, fecha_registro, ultima_operacion,
+                   operaciones_total, volumen_usdt
+            FROM clientes ORDER BY volumen_usdt DESC
+        """).fetchall()
+        conn.close()
+
+        if clientes:
+            gs_clear("CLIENTES!A5:J300")
+            filas_cl = [[
+                r['nombre'], r['telefono'] or '', '', r['fecha_registro'],
+                r['ultima_operacion'], r['operaciones_total'],
+                r['volumen_usdt'], '', 'Activo', ''
+            ] for r in clientes]
+            gs_write("CLIENTES!A5", filas_cl)
+            reporte.append(f"✅ CLIENTES: {len(clientes)} registros")
+
+    except Exception as e:
+        import traceback
+        reporte.append(f"❌ Error: {e}")
+        print(f"gs_sync_inicial error: {traceback.format_exc()}")
+
+    return "\n".join(reporte)
+
 def gs_actualizar_relacion_diaria(resultado):
     """
     Punto de entrada principal: actualiza Google Sheets
@@ -3420,6 +3628,14 @@ def procesar(chat_id, texto):
                 send(chat_id,f"✅ Supabase responde: `{r.status_code}` — `{r.text[:100]}`")
             except Exception as e: send(chat_id,f"❌ Error: `{e}`")
         else: send(chat_id,"❌ USE_SUPABASE es False")
+
+    elif cmd == '/gssync':
+        send(chat_id, "⏳ Sincronizando Google Sheets desde base de datos...\nEsto puede tomar 30-60 segundos.")
+        def _sync_gs():
+            reporte = gs_sync_inicial()
+            send(chat_id, f"📊 *SINCRONIZACIÓN COMPLETADA*\n\n{reporte}")
+        import threading
+        threading.Thread(target=_sync_gs, daemon=True).start()
 
     elif cmd == '/gstest':
         send(chat_id, "⏳ Probando conexión Google Sheets...")
