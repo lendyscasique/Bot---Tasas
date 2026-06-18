@@ -613,6 +613,7 @@ def analizar_capital():
     ahora = now_local()
     hora_actual = ahora.hour
     dia_actual = DIAS_SEMANA[ahora.weekday()]
+    dia_semana_num = str((ahora.weekday() + 1) % 7)  # 0=domingo, 1=lunes...
 
     pat_bs  = ((t.get('ban_bs_compra',0) or 0) + (t.get('ban_bs_venta',0) or 0)) / 2 or 1
     dol_obs = t.get('dolar_obs',1) or 1
@@ -672,9 +673,9 @@ def analizar_capital():
     conn = get_conn()
     ops_historico = conn.execute("""
         SELECT COUNT(*) as cnt FROM operaciones
-        WHERE strftime('%H', hora) = ? AND dia_semana_local = ?
+        WHERE strftime('%H', hora) = ? AND strftime('%w', hora) = ?
         AND estado='Completada'
-    """, (str(hora_actual).zfill(2), dia_actual)).fetchone()
+    """, (str(hora_actual).zfill(2), dia_semana_num)).fetchone()
     conn.close()
 
     return {
@@ -6934,13 +6935,18 @@ def main():
                     texto = msg.get("text", "")
                     if "document" in msg:
                         doc = msg["document"]
+                        nombre_doc = doc.get('file_name','archivo')
+                        file_size = doc.get('file_size', 0)
+                        print(f"📎 Archivo recibido: {nombre_doc} ({file_size/1024:.1f} KB) de {chat_id}")
                         import threading as _th
                         _th.Thread(
                             target=procesar_documento,
-                            args=(chat_id, doc.get('file_id'), doc.get('file_name','archivo')),
+                            args=(chat_id, doc.get('file_id'), nombre_doc),
                             daemon=True
                         ).start()
+                        print(f"🔄 Hilo de procesamiento iniciado para {nombre_doc}")
                     elif texto:
+                        print(f"💬 Mensaje de {chat_id}: {texto[:50]}")
                         procesar(chat_id, texto)
         except Exception as e:
             print(f"Error main: {e}"); time.sleep(5)
