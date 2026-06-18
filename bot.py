@@ -2434,9 +2434,9 @@ def get_updates(offset=0):
 
 def download_file(file_id):
     try:
-        r = requests.get(f"{BASE_URL}/getFile", params={"file_id": file_id}, timeout=10)
+        r = requests.get(f"{BASE_URL}/getFile", params={"file_id": file_id}, timeout=15)
         file_path = r.json()["result"]["file_path"]
-        r2 = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}", timeout=30)
+        r2 = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}", timeout=60)
         return r2.content
     except Exception as e:
         print(f"Error descargando archivo: {e}"); return None
@@ -3150,7 +3150,7 @@ def leer_saldos_auxiliares(ruta_archivo, fecha_hoja):
     }
 
     try:
-        wb = load_workbook(ruta_archivo, data_only=True)
+        wb = load_workbook(ruta_archivo, data_only=True, read_only=True)
     except Exception as e:
         for k in saldos:
             saldos[k]['error'] = f"No pude abrir archivo: {e}"
@@ -3428,7 +3428,7 @@ def importar_relacion_diaria(ruta_archivo, chat_id):
         return str(v).strip()
 
     try:
-        wb = load_workbook(ruta_archivo, data_only=True)
+        wb = load_workbook(ruta_archivo, data_only=True, read_only=True)
     except Exception as e:
         resultado['errores'].append(f"No pude abrir el archivo: {e}")
         return resultado
@@ -3950,10 +3950,17 @@ def procesar_documento(chat_id, file_id, nombre):
     if not (nombre_lower.endswith('.xlsx') or nombre_lower.endswith('.csv')):
         send(chat_id, f"⚠️ Solo acepto .xlsx o .csv\nRecibí: `{nombre}`"); return
 
-    send(chat_id, f"⏳ Procesando `{nombre}`...")
+    send(chat_id, f"⏳ Descargando y procesando `{nombre}`...\n_Esto puede tomar unos segundos._")
     contenido = download_file(file_id)
     if not contenido:
-        send(chat_id, "❌ No pude descargar el archivo."); return
+        send(chat_id, "❌ No pude descargar el archivo. Intenta de nuevo."); return
+    
+    # Verificar que es un ZIP válido (xlsx)
+    if nombre_lower.endswith('.xlsx') and not contenido[:4] == b'PK\x03\x04':
+        if not contenido[:2] == b'PK':
+            send(chat_id, "❌ El archivo parece estar corrupto o no es un .xlsx válido.\n"
+                         "Guárdalo en Excel como *Libro de Excel (.xlsx)* y vuelve a enviarlo.")
+            return
 
     import tempfile
     if nombre_lower.endswith('.csv'):
@@ -4001,11 +4008,14 @@ def procesar_documento(chat_id, file_id, nombre):
                 resultado = procesar_saldos_auxiliares(ruta_tmp, resultado, guardado)
             except Exception as _ae:
                 resultado['advertencias'].append(f"Saldos auxiliares: {_ae}")
-            # Sincronizar con Supabase
-            try:
-                _sync_relacion_diaria_supabase(resultado, str(chat_id))
-            except Exception as _se:
-                resultado['advertencias'].append(f"Supabase: {_se}")
+            # Sincronizar con Supabase en background
+            import threading
+            def _sync_bg():
+                try:
+                    _sync_relacion_diaria_supabase(resultado, str(chat_id))
+                except Exception as _se:
+                    print(f"Supabase sync error: {_se}")
+            threading.Thread(target=_sync_bg, daemon=True).start()
             send(chat_id, formatear_resultado_relacion_diaria(resultado, guardado))
             # Guardar para consulta posterior de saldo Binance
             if resultado.get('saldos_cierre'):
