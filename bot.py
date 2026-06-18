@@ -2748,6 +2748,18 @@ def procesar(chat_id, texto):
         ok, msg = ejecutar_cierre_diario(usuario=str(chat_id), forzar=forzar)
         send(chat_id, msg)
 
+    elif cmd=='/cierre':
+        # /cierre 05/06/2026 → consulta saldos de cierre de esa fecha desde Supabase/SQLite
+        if len(partes) >= 2:
+            try:
+                import datetime as _dt2
+                fecha_iso = _dt2.datetime.strptime(partes[1], '%d/%m/%Y').strftime('%Y-%m-%d')
+                send(chat_id, msg_cierre_fecha(fecha_iso))
+            except:
+                send(chat_id, "Uso: /cierre DD/MM/YYYY\nEjemplo: /cierre 05/06/2026")
+        else:
+            send(chat_id, "Uso: /cierre DD/MM/YYYY\nEjemplo: /cierre 05/06/2026")
+
     elif cmd=='/traslado':
         if len(partes) >= 4:
             try:
@@ -3182,21 +3194,48 @@ def leer_saldos_auxiliares(ruta_archivo, fecha_hoja):
             saldos[k]['error'] = "Fecha inválida"
         return saldos
 
+    # ══════════════════════════════════════════════════════════════
+    # LÓGICA COMÚN: para Banesco, Mercantil y Copec
+    # Col B = fecha, Col F = saldo acumulado corrido (running balance)
+    # Tomamos la ÚLTIMA fila cuya fecha <= fecha_obj → saldo cierre de ese día
+    # ══════════════════════════════════════════════════════════════
+
+    def leer_saldo_corrido(ws, min_row=11, col_fecha=1, col_saldo=5):
+        """
+        Lee el saldo de cierre acumulado hasta fecha_obj.
+        La Col F del auxiliar ya tiene el saldo corrido (running balance),
+        así que tomamos la última fila con fecha <= fecha_obj.
+        """
+        ultimo_saldo = None
+        filas_hasta_fecha = 0
+        filas_del_dia = 0
+        for row in ws.iter_rows(min_row=min_row, values_only=True):
+            fecha_cel = row[col_fecha]
+            saldo_cel = row[col_saldo]
+            if fecha_cel is None or saldo_cel is None: continue
+            # Obtener fecha de la celda
+            if isinstance(fecha_cel, (datetime, date)):
+                f = fecha_cel.date() if isinstance(fecha_cel, datetime) else fecha_cel
+            else:
+                try: f = datetime.strptime(str(fecha_cel)[:10], '%Y-%m-%d').date()
+                except: continue
+            # Acumular todo lo que sea <= fecha pedida
+            if f <= fecha_obj:
+                ultimo_saldo = safe_float(saldo_cel)
+                filas_hasta_fecha += 1
+                if f == fecha_obj:
+                    filas_del_dia += 1
+        return ultimo_saldo, filas_hasta_fecha, filas_del_dia
+
     # ── BANESCO ──
     hojas_banesco = ['Banco Banesco', 'BANCO BANESCO', 'Banesco', 'banesco']
     for nombre in hojas_banesco:
         if nombre in wb.sheetnames:
             ws = wb[nombre]
-            ultimo_saldo = None
-            filas = 0
-            for row in ws.iter_rows(min_row=11, values_only=True):
-                fecha_cel = row[1]  # Col B (índice 1)
-                saldo_cel = row[5]  # Col F (índice 5)
-                if es_fecha(fecha_cel, fecha_obj) and saldo_cel is not None:
-                    ultimo_saldo = safe_float(saldo_cel)
-                    filas += 1
-            saldos['BS_BANESCO']['saldo'] = ultimo_saldo
-            saldos['BS_BANESCO']['filas'] = filas
+            saldo, filas_tot, filas_dia = leer_saldo_corrido(ws)
+            saldos['BS_BANESCO']['saldo'] = saldo
+            saldos['BS_BANESCO']['filas'] = filas_dia
+            saldos['BS_BANESCO']['filas_acum'] = filas_tot
             break
     else:
         saldos['BS_BANESCO']['error'] = "Hoja Banesco no encontrada"
@@ -3206,16 +3245,10 @@ def leer_saldos_auxiliares(ruta_archivo, fecha_hoja):
     for nombre in hojas_merc:
         if nombre in wb.sheetnames:
             ws = wb[nombre]
-            ultimo_saldo = None
-            filas = 0
-            for row in ws.iter_rows(min_row=11, values_only=True):
-                fecha_cel = row[1]  # Col B
-                saldo_cel = row[5]  # Col F
-                if es_fecha(fecha_cel, fecha_obj) and saldo_cel is not None:
-                    ultimo_saldo = safe_float(saldo_cel)
-                    filas += 1
-            saldos['BS_MERCANTIL']['saldo'] = ultimo_saldo
-            saldos['BS_MERCANTIL']['filas'] = filas
+            saldo, filas_tot, filas_dia = leer_saldo_corrido(ws)
+            saldos['BS_MERCANTIL']['saldo'] = saldo
+            saldos['BS_MERCANTIL']['filas'] = filas_dia
+            saldos['BS_MERCANTIL']['filas_acum'] = filas_tot
             break
     else:
         saldos['BS_MERCANTIL']['error'] = "Hoja Mercantil no encontrada"
@@ -3225,92 +3258,116 @@ def leer_saldos_auxiliares(ruta_archivo, fecha_hoja):
     for nombre in hojas_copec:
         if nombre in wb.sheetnames:
             ws = wb[nombre]
-            ultimo_saldo = None
-            filas = 0
-            for row in ws.iter_rows(min_row=11, values_only=True):
-                fecha_cel = row[1]  # Col B
-                saldo_cel = row[5]  # Col F
-                # Saltar fila de totales (col B vacía pero col D tiene SUM)
-                if fecha_cel is None: continue
-                if es_fecha(fecha_cel, fecha_obj) and saldo_cel is not None:
-                    ultimo_saldo = safe_float(saldo_cel)
-                    filas += 1
-            saldos['CLP_COPEC_PAY']['saldo'] = ultimo_saldo
-            saldos['CLP_COPEC_PAY']['filas'] = filas
+            saldo, filas_tot, filas_dia = leer_saldo_corrido(ws)
+            saldos['CLP_COPEC_PAY']['saldo'] = saldo
+            saldos['CLP_COPEC_PAY']['filas'] = filas_dia
+            saldos['CLP_COPEC_PAY']['filas_acum'] = filas_tot
             break
     else:
         saldos['CLP_COPEC_PAY']['error'] = "Hoja Copec no encontrada"
 
     # ── AIRTM ──
+    # Col C = fecha, Col L = USDC entrada, Col M = USDC salida, Col N = comisión
+    # Sumamos todas las transacciones hasta fecha_obj para obtener saldo acumulado
     hojas_airtm = ['Airtm', 'AIRTM', 'airtm']
     for nombre in hojas_airtm:
         if nombre in wb.sheetnames:
             ws = wb[nombre]
-            # Buscar fila de totales (contiene "Total" en col H)
-            usdc_neto = None
+            usdc_acum = 0.0
+            filas_dia = 0
+            filas_tot = 0
+            for row in ws.iter_rows(min_row=14, values_only=True):
+                fecha_cel = row[2]   # Col C
+                tipo_cel  = str(row[3] or '').strip().lower()  # Col D
+                entrada   = row[11]  # Col L = USDC entrada
+                salida    = row[12]  # Col M = USDC salida
+                status    = str(row[9] or '').strip().lower()  # Col J
+                if fecha_cel is None: continue
+                if 'total' in str(fecha_cel).lower(): break  # fila de totales = fin
+                if isinstance(fecha_cel, (datetime, date)):
+                    f = fecha_cel.date() if isinstance(fecha_cel, datetime) else fecha_cel
+                else:
+                    try: f = datetime.strptime(str(fecha_cel)[:10], '%Y-%m-%d').date()
+                    except: continue
+                if f > fecha_obj: continue
+                if 'completado' not in status and 'completed' not in status: continue
+                if tipo_cel == 'apertura':
+                    # Fila de apertura: no suma, es el punto de inicio
+                    continue
+                neto = safe_float(entrada) - safe_float(salida)
+                usdc_acum += neto
+                filas_tot += 1
+                if f == fecha_obj:
+                    filas_dia += 1
+
+            # Si hay fila de totales usar ese valor (más preciso)
             for row in ws.iter_rows(min_row=10, values_only=True):
-                cel_h = str(row[7] or '').lower()  # Col H
+                cel_h = str(row[7] or '').lower()
                 if 'total' in cel_h:
-                    # Col O = índice 14 = USDC Total neto
-                    usdc_neto = safe_float(row[14])
+                    val = safe_float(row[14])  # Col O = total neto
+                    if val != 0:
+                        usdc_acum = val
                     break
-            # Si no encontró fila total, sumar columna O
-            if usdc_neto is None:
-                usdc_sum = 0
-                for row in ws.iter_rows(min_row=14, values_only=True):
-                    fecha_cel = row[2]  # Col C
-                    o_val = row[14]     # Col O
-                    if es_fecha(fecha_cel, fecha_obj) and o_val is not None:
-                        try: usdc_sum += float(o_val)
-                        except: pass
-                usdc_neto = usdc_sum if usdc_sum != 0 else None
-            saldos['USDC_AIRTM']['saldo'] = usdc_neto
+
+            saldos['USDC_AIRTM']['saldo'] = round(usdc_acum, 4) if filas_tot > 0 else None
+            saldos['USDC_AIRTM']['filas'] = filas_dia
             break
     else:
         saldos['USDC_AIRTM']['error'] = "Hoja Airtm no encontrada"
 
     # ── BINANCE ──
+    # Calcula saldo acumulado desde saldo_inicial hasta fecha_obj
+    # descontando Maker Fee + Taker Fee de cada orden
     hojas_binance = ['Binance', 'BINANCE', 'binance']
     for nombre in hojas_binance:
         if nombre in wb.sheetnames:
             ws = wb[nombre]
-            # Leer desde fila 18 (datos C2C)
-            # Col D = Order Type (Buy/Sell)
-            # Col I = Quantity (USDT)
-            # Col O = Created Time (fecha)
-            # Col N = Status
-            compras = 0.0
-            ventas  = 0.0
-            filas   = 0
+            # Agrupar por fecha para mostrar desglose del día pedido
+            por_fecha = {}
             for row in ws.iter_rows(min_row=18, values_only=True):
-                tipo    = str(row[3] or '').strip()   # Col D
-                qty     = row[8]                       # Col I
-                status  = str(row[13] or '').strip()  # Col N
-                fecha_s = str(row[14] or '')[:10]     # Col O (fecha)
-                
+                tipo    = str(row[3] or '').strip()
+                qty     = row[8]   # Col I = Quantity
+                maker   = row[10]  # Col K = Maker Fee
+                taker   = row[11]  # Col L = Taker Fee
+                status  = str(row[13] or '').strip()
+                fecha_s = str(row[14] or '')[:10]
                 if not tipo or qty is None: continue
-                if 'Completed' not in status and 'completed' not in status.lower():
-                    continue
-                # Verificar fecha
+                if 'Completed' not in status and 'completed' not in status.lower(): continue
                 try:
                     f = datetime.strptime(fecha_s, '%Y-%m-%d').date()
-                    if f != fecha_obj: continue
+                    if f > fecha_obj: continue  # ignorar fechas futuras
                 except: continue
-                
-                qty_f = safe_float(qty)
+                fee = safe_float(maker) + safe_float(taker)
+                qty_neta = safe_float(qty) - fee
+                if f not in por_fecha:
+                    por_fecha[f] = {'buy': 0.0, 'sell': 0.0, 'fee': 0.0, 'cnt': 0}
+                por_fecha[f]['fee'] += fee
+                por_fecha[f]['cnt'] += 1
                 if tipo.lower() == 'buy':
-                    compras += qty_f
+                    por_fecha[f]['buy'] += qty_neta
                 elif tipo.lower() == 'sell':
-                    ventas += qty_f
-                filas += 1
+                    por_fecha[f]['sell'] += qty_neta
 
-            saldos['USDT_BINANCE']['saldo'] = round(compras - ventas, 6) if filas > 0 else None
-            saldos['USDT_BINANCE']['filas'] = filas
-            # Nota: esto es el MOVIMIENTO neto del día, no el saldo acumulado
-            # El saldo real = saldo_inicial + movimiento_neto
-            saldos['USDT_BINANCE']['movimiento_neto'] = round(compras - ventas, 6)
-            saldos['USDT_BINANCE']['compras'] = round(compras, 6)
-            saldos['USDT_BINANCE']['ventas']  = round(ventas, 6)
+            # Acumular desde saldo inicial hasta fecha_obj
+            # (el saldo inicial se inyecta desde procesar_saldos_auxiliares)
+            total_buy  = sum(d['buy']  for d in por_fecha.values())
+            total_sell = sum(d['sell'] for d in por_fecha.values())
+            total_fee  = sum(d['fee']  for d in por_fecha.values())
+            total_ord  = sum(d['cnt']  for d in por_fecha.values())
+
+            # Desglose solo del día pedido
+            dia_data = por_fecha.get(fecha_obj, {'buy': 0.0, 'sell': 0.0, 'fee': 0.0, 'cnt': 0})
+
+            saldos['USDT_BINANCE']['compras_acum']  = round(total_buy, 4)
+            saldos['USDT_BINANCE']['ventas_acum']   = round(total_sell, 4)
+            saldos['USDT_BINANCE']['fees_acum']     = round(total_fee, 4)
+            saldos['USDT_BINANCE']['filas_acum']    = total_ord
+            saldos['USDT_BINANCE']['compras_dia']   = round(dia_data['buy'], 4)
+            saldos['USDT_BINANCE']['ventas_dia']    = round(dia_data['sell'], 4)
+            saldos['USDT_BINANCE']['fees_dia']      = round(dia_data['fee'], 4)
+            saldos['USDT_BINANCE']['filas']         = dia_data['cnt']
+            # El saldo calculado final se completa en procesar_saldos_auxiliares
+            # una vez que se conoce el saldo_inicial_usdt
             break
     else:
         saldos['USDT_BINANCE']['error'] = "Hoja Binance no encontrada"
@@ -3319,11 +3376,11 @@ def leer_saldos_auxiliares(ruta_archivo, fecha_hoja):
 
 
 def calcular_saldo_cierre_binance(saldo_inicial_usdt, saldos_aux):
-    """Calcula saldo final USDT = inicial + compras - ventas del día."""
+    """Calcula saldo final USDT = inicial + acumulado neto (con fees) hasta fecha."""
     mov = saldos_aux.get('USDT_BINANCE', {})
-    compras = mov.get('compras', 0) or 0
-    ventas  = mov.get('ventas', 0) or 0
-    return round(saldo_inicial_usdt + compras - ventas, 6)
+    compras_acum = mov.get('compras_acum', 0) or 0
+    ventas_acum  = mov.get('ventas_acum', 0) or 0
+    return round(saldo_inicial_usdt + compras_acum - ventas_acum, 6)
 
 
 def formatear_saldos_cierre(saldos_aux, saldo_inicial_usdt=0, saldos_reales=None):
@@ -3355,13 +3412,24 @@ def formatear_saldos_cierre(saldos_aux, saldo_inicial_usdt=0, saldos_reales=None
         # Calcular saldo calculado
         if cuenta == 'USDT_BINANCE':
             saldo_calc = calcular_saldo_cierre_binance(saldo_inicial_usdt, saldos_aux)
-            compras = data.get('compras', 0) or 0
-            ventas  = data.get('ventas', 0) or 0
+            compras_acum = data.get('compras_acum', 0) or 0
+            ventas_acum  = data.get('ventas_acum', 0) or 0
+            fees_acum    = data.get('fees_acum', 0) or 0
+            compras_dia  = data.get('compras_dia', 0) or 0
+            ventas_dia   = data.get('ventas_dia', 0) or 0
+            fees_dia     = data.get('fees_dia', 0) or 0
+            filas_acum   = data.get('filas_acum', 0) or 0
             m += f"{emoji} *{cuenta}*\n"
-            m += f"   Inicial:    `{saldo_inicial_usdt:,.4f} USDT`\n"
-            m += f"   Compras:   +`{compras:,.4f} USDT`\n"
-            m += f"   Ventas:    -`{ventas:,.4f} USDT`\n"
-            m += f"   Calculado:  `{saldo_calc:,.4f} USDT`\n"
+            m += f"   Inicial:         `{saldo_inicial_usdt:,.4f} USDT`\n"
+            m += f"   Compras acum:   +`{compras_acum:,.4f} USDT`\n"
+            m += f"   Ventas acum:    -`{ventas_acum:,.4f} USDT`\n"
+            fee_str = f'{fees_acum:,.4f}' if fees_acum else '0.0000'
+            m += f"   Fees acum:      -`{fee_str} USDT`\n"
+            m += f"   Calculado:       `{saldo_calc:,.4f} USDT`\n"
+            if compras_dia or ventas_dia:
+                cnt_dia = data.get("filas", 0)
+                m += f"   _Hoy: +{compras_dia:.4f} / -{ventas_dia:.4f} (fee {fees_dia:.4f}) | {cnt_dia} ords_\n"
+            m += f"   _({filas_acum} órdenes totales en auxiliar)_\n"
         else:
             saldo_calc = data.get('saldo')
             filas = data.get('filas', 0)
@@ -5718,6 +5786,75 @@ Gastos: `{gastos:.4f} USDT`
 📋 CXC pendiente: `{cxc:.4f} USDT`
 📋 CXP pendiente: `{cxp:.4f} USDT`
 📦 Inventario: `{inv['cantidad']:.4f} USDT`{alerta_c2c}"""
+
+def msg_cierre_fecha(fecha_iso):
+    """Consulta el cierre de un día específico desde SQLite/Supabase."""
+    conn = get_conn()
+    cierre = conn.execute(
+        "SELECT * FROM cierres_diarios WHERE fecha=?", (fecha_iso,)
+    ).fetchone()
+    saldos_aux_db = conn.execute(
+        "SELECT cuenta, monto, moneda FROM gsa_saldos_cierre WHERE fecha=? ORDER BY cuenta",
+        (fecha_iso,)
+    ).fetchall()
+    conn.close()
+
+    import datetime as _dt2
+    fecha_legible = _dt2.datetime.strptime(fecha_iso, '%Y-%m-%d').strftime('%d/%m/%Y')
+    nombre_hoja   = _dt2.datetime.strptime(fecha_iso, '%Y-%m-%d').strftime('%d%m%Y')
+
+    if not cierre and not saldos_aux_db:
+        return (
+            f"📅 *CIERRE {fecha_legible}*\n\n"
+            f"No hay datos registrados para esta fecha.\n\n"
+            f"Para ver los saldos de cierre:\n"
+            f"1. Abre el Excel GSA Relacion Diaria\n"
+            f"2. Asegurate que la hoja del dia se llame `{nombre_hoja}`\n"
+            f"3. Actualiza los auxiliares hasta esa fecha\n"
+            f"4. Envia el archivo aqui"
+        )
+
+    m = f"📅 *CIERRE {fecha_legible}*\n"
+    m += "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    if saldos_aux_db:
+        m += "💰 *SALDOS DE CIERRE:*\n"
+        iconos = {
+            'BS_BANESCO': '🏦', 'BS_MERCANTIL': '🏦',
+            'CLP_COPEC_PAY': '💳', 'USDT_BINANCE': '🔐',
+            'USDC_AIRTM': '💵', 'BC_61_Jesus': '🏛️',
+            'BC_62_Nataly': '🏛️', 'CAJA_ORLANDO': '💵',
+        }
+        for row in saldos_aux_db:
+            cuenta = row[0]; monto = row[1]; moneda = row[2]
+            ico    = iconos.get(cuenta, '📊')
+            nombre = NOMBRES_CUENTAS.get(cuenta, cuenta)
+            if moneda in ('USDT', 'USDC'):
+                m += f"  {ico} {nombre}: `{monto:,.4f} {moneda}`\n"
+            else:
+                m += f"  {ico} {nombre}: `{monto:,.2f} {moneda}`\n"
+        m += "\n"
+
+    if cierre:
+        m += "📊 *P&L DEL DIA:*\n"
+        m += f"  Ops: `{cierre['ops_total']}` | Vol: `{cierre['volumen_usdt']:.4f} USDT`\n"
+        m += f"  Gan. comercial:  `{cierre['ganancia_comercial_usdt']:.4f} USDT`\n"
+        m += f"  Gan. financiera: `{cierre['ganancia_financiera_usdt']:.4f} USDT`\n"
+        m += f"  Gastos:          `{cierre['gastos_usdt']:.4f} USDT`\n"
+        m += "  ─────────────────────\n"
+        m += f"  *Utilidad neta: `{cierre['utilidad_neta_usdt']:.4f} USDT`*\n\n"
+        m += f"🏛️ Patrimonio: `{cierre['patrimonio_usdt']:.4f} USDT`\n"
+        if cierre['cxc_total'] > 0:
+            m += f"📥 CXC: `{cierre['cxc_total']:.4f} USDT`\n"
+        if cierre['cxp_total'] > 0:
+            m += f"📤 CXP: `{cierre['cxp_total']:.4f} USDT`\n"
+        if cierre['inventario_usdt'] > 0:
+            m += f"📦 Inventario: `{cierre['inventario_usdt']:.4f} USDT` (CPP `{cierre['cpp_bs']:.2f} Bs`)\n"
+    else:
+        m += "_Sin cierre formal — usa /cierredia para registrarlo_\n"
+
+    return m
+
 
 def reconstruir_dia(fecha_str):
     """Reconstruye el estado completo de un día desde el ledger."""
