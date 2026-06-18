@@ -4184,15 +4184,29 @@ def formatear_resultado_relacion_diaria_partes(resultado, guardado):
     msgs.append(m1)
 
     # MSG 2: CXC y CXP pendientes
+    # Primero construir set de clientes ya resueltos en hojas del día
+    # (Cobrado total, Pagado, Cancelada) para excluirlos del mes anterior
+    cxc_resueltas = set()
+    for c in resultado.get('cxc_dia', []):
+        if c.get('status','') not in ('Pendiente', 'Parcial', ''):
+            cxc_resueltas.add((c.get('cliente',''), c.get('monto',0), c.get('moneda','')))
+
+    cxp_resueltas = set()
+    for c in resultado.get('cxp_dia', []):
+        if c.get('status','') not in ('Pendiente', 'Parcial', ''):
+            cxp_resueltas.add((c.get('acreedor',''), c.get('monto',0), c.get('moneda','')))
+
     m2 = ""
     cxc_vistas = set()
     cxc_pend = []
+    # Primero las del día (estado más actualizado), luego mes anterior
     for c in resultado.get('cxc_dia', []) + resultado.get('cxc_mes_anterior', []):
+        key = (c.get('cliente',''), c.get('monto',0), c.get('moneda',''))
+        if key in cxc_resueltas: continue  # ya cobrada en hojas del día
+        if key in cxc_vistas: continue     # ya procesada
+        cxc_vistas.add(key)
         if c.get('status') == 'Pendiente':
-            key = (c.get('cliente',''), c.get('monto',0), c.get('moneda',''))
-            if key not in cxc_vistas:
-                cxc_vistas.add(key)
-                cxc_pend.append(c)
+            cxc_pend.append(c)
     if cxc_pend:
         m2 += f"📥 *CXC Pendientes:*\n"
         for c in cxc_pend[:8]:
@@ -4201,11 +4215,12 @@ def formatear_resultado_relacion_diaria_partes(resultado, guardado):
     cxp_vistas = set()
     cxp_pend = []
     for c in resultado.get('cxp_dia', []) + resultado.get('cxp_mes_anterior', []):
+        key = (c.get('acreedor',''), c.get('monto',0), c.get('moneda',''))
+        if key in cxp_resueltas: continue  # ya pagada en hojas del día
+        if key in cxp_vistas: continue
+        cxp_vistas.add(key)
         if c.get('status') == 'Pendiente':
-            key = (c.get('acreedor',''), c.get('monto',0), c.get('moneda',''))
-            if key not in cxp_vistas:
-                cxp_vistas.add(key)
-                cxp_pend.append(c)
+            cxp_pend.append(c)
     if cxp_pend:
         m2 += f"📤 *CXP Pendientes:*\n"
         for c in cxp_pend[:5]:
@@ -4276,29 +4291,41 @@ def formatear_resultado_relacion_diaria(resultado, guardado):
         if pendientes:
             m += f"  ⚠️ Pendientes: {pendientes}\n"
 
-    # CXC pendientes — deduplicar por cliente+monto+moneda
+    # CXC pendientes — excluir las ya cobradas en hojas del día
+    cxc_resueltas2 = set()
+    for c in resultado.get('cxc_dia', []):
+        if c.get('status','') not in ('Pendiente', 'Parcial', ''):
+            cxc_resueltas2.add((c.get('cliente',''), c.get('monto',0), c.get('moneda','')))
+
     cxc_vistas = set()
     cxc_pend = []
     for c in resultado.get('cxc_dia', []) + resultado.get('cxc_mes_anterior', []):
+        key = (c.get('cliente',''), c.get('monto',0), c.get('moneda',''))
+        if key in cxc_resueltas2: continue
+        if key in cxc_vistas: continue
+        cxc_vistas.add(key)
         if c.get('status') == 'Pendiente':
-            key = (c.get('cliente',''), c.get('monto',0), c.get('moneda',''))
-            if key not in cxc_vistas:
-                cxc_vistas.add(key)
-                cxc_pend.append(c)
+            cxc_pend.append(c)
     if cxc_pend:
         m += f"\n📥 *CXC Pendientes:*\n"
         for c in cxc_pend[:5]:
             m += f"  • {c['cliente']}: `{c['monto']:,.2f} {c['moneda']}`\n"
 
-    # CXP pendientes — deduplicar por acreedor+monto+moneda
+    # CXP pendientes — excluir las ya pagadas en hojas del día
+    cxp_resueltas2 = set()
+    for c in resultado.get('cxp_dia', []):
+        if c.get('status','') not in ('Pendiente', 'Parcial', ''):
+            cxp_resueltas2.add((c.get('acreedor',''), c.get('monto',0), c.get('moneda','')))
+
     cxp_vistas = set()
     cxp_pend = []
     for c in resultado.get('cxp_dia', []) + resultado.get('cxp_mes_anterior', []):
+        key = (c.get('acreedor',''), c.get('monto',0), c.get('moneda',''))
+        if key in cxp_resueltas2: continue
+        if key in cxp_vistas: continue
+        cxp_vistas.add(key)
         if c.get('status') == 'Pendiente':
-            key = (c.get('acreedor',''), c.get('monto',0), c.get('moneda',''))
-            if key not in cxp_vistas:
-                cxp_vistas.add(key)
-                cxp_pend.append(c)
+            cxp_pend.append(c)
     if cxp_pend:
         m += f"\n📤 *CXP Pendientes:*\n"
         for c in cxp_pend[:5]:
