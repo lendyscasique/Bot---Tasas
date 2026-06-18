@@ -3953,11 +3953,20 @@ def formatear_resultado_relacion_diaria_partes(resultado, guardado):
 
     # MSG 3: Saldos de cierre
     saldos_cierre = resultado.get('saldos_cierre')
+    print(f"📊 saldos_cierre presente: {saldos_cierre is not None}")
     if saldos_cierre:
         saldo_usdt_ini = resultado.get('saldo_inicial_usdt', 0)
-        m3 = formatear_saldos_cierre(saldos_cierre, saldo_usdt_ini)
-        if m3:
-            msgs.append(m3)
+        print(f"📊 Generando mensaje saldos cierre...")
+        try:
+            m3 = formatear_saldos_cierre(saldos_cierre, saldo_usdt_ini)
+            print(f"📊 m3 generado: {len(m3)} chars")
+            if m3:
+                msgs.append(m3)
+        except Exception as _e3:
+            print(f"❌ Error generando saldos cierre: {_e3}")
+            import traceback; print(traceback.format_exc())
+    else:
+        print(f"📊 Sin saldos_cierre en resultado")
 
     # Advertencias
     advertencias = resultado.get('advertencias', [])
