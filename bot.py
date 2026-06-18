@@ -2433,13 +2433,27 @@ def get_updates(offset=0):
     except: return []
 
 def download_file(file_id):
-    try:
-        r = requests.get(f"{BASE_URL}/getFile", params={"file_id": file_id}, timeout=15)
-        file_path = r.json()["result"]["file_path"]
-        r2 = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}", timeout=60)
-        return r2.content
-    except Exception as e:
-        print(f"Error descargando archivo: {e}"); return None
+    """Descarga archivo con reintentos automáticos."""
+    for intento in range(3):
+        try:
+            r = requests.get(f"{BASE_URL}/getFile",
+                           params={"file_id": file_id}, timeout=15)
+            file_path = r.json()["result"]["file_path"]
+            url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+            # Streaming para archivos grandes
+            r2 = requests.get(url, timeout=90, stream=True)
+            chunks = []
+            for chunk in r2.iter_content(chunk_size=8192):
+                if chunk:
+                    chunks.append(chunk)
+            contenido = b''.join(chunks)
+            if len(contenido) > 0:
+                return contenido
+            print(f"Intento {intento+1}: archivo vacío")
+        except Exception as e:
+            print(f"Intento {intento+1} error: {e}")
+            import time; time.sleep(2)
+    return None
 
 # ══════════════════════════════════════════════════════════════════════
 # PROCESADOR DE COMANDOS
@@ -6920,7 +6934,12 @@ def main():
                     texto = msg.get("text", "")
                     if "document" in msg:
                         doc = msg["document"]
-                        procesar_documento(chat_id, doc.get("file_id"), doc.get("file_name","archivo"))
+                        import threading as _th
+                        _th.Thread(
+                            target=procesar_documento,
+                            args=(chat_id, doc.get('file_id'), doc.get('file_name','archivo')),
+                            daemon=True
+                        ).start()
                     elif texto:
                         procesar(chat_id, texto)
         except Exception as e:
