@@ -74,6 +74,348 @@ def supa_update(tabla, campo, valor, datos):
     except Exception as e:
         print(f"Supabase update error ({tabla}): {e}"); return None
 
+
+# ══════════════════════════════════════════════════════════════════════
+# GOOGLE SHEETS — INTEGRACIÓN EN TIEMPO REAL
+# ══════════════════════════════════════════════════════════════════════
+GOOGLE_SHEETS_ID          = os.getenv("GOOGLE_SHEETS_ID", "")
+GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
+USE_GOOGLE_SHEETS = bool(GOOGLE_SHEETS_ID and GOOGLE_SHEETS_CREDENTIALS)
+print(f"📊 Google Sheets: {'ACTIVADO' if USE_GOOGLE_SHEETS else 'DESACTIVADO'}")
+
+_gs_service = None  # caché del servicio autorizado
+
+def _get_sheets_service():
+    """Retorna el servicio de Google Sheets autenticado (singleton)."""
+    global _gs_service
+    if _gs_service:
+        return _gs_service
+    if not USE_GOOGLE_SHEETS:
+        return None
+    try:
+        from google.oauth2.service_account import Credentials
+        from googleapiclient.discovery import build
+        creds_dict = json.loads(GOOGLE_SHEETS_CREDENTIALS)
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        _gs_service = build("sheets", "v4", credentials=creds)
+        print("✅ Google Sheets service conectado")
+        return _gs_service
+    except Exception as e:
+        print(f"❌ Google Sheets error: {e}")
+        return None
+
+def gs_write(rango, valores, value_input="USER_ENTERED"):
+    """Escribe valores en el Google Sheet. rango ej: 'TASAS!C8'"""
+    svc = _get_sheets_service()
+    if not svc: return False
+    try:
+        body = {"values": valores}
+        svc.spreadsheets().values().update(
+            spreadsheetId=GOOGLE_SHEETS_ID,
+            range=rango,
+            valueInputOption=value_input,
+            body=body,
+        ).execute()
+        return True
+    except Exception as e:
+        print(f"❌ gs_write error ({rango}): {e}")
+        return False
+
+def gs_append(rango, valores, value_input="USER_ENTERED"):
+    """Agrega filas al final de un rango en el Google Sheet."""
+    svc = _get_sheets_service()
+    if not svc: return False
+    try:
+        body = {"values": valores}
+        svc.spreadsheets().values().append(
+            spreadsheetId=GOOGLE_SHEETS_ID,
+            range=rango,
+            valueInputOption=value_input,
+            insertDataOption="INSERT_ROWS",
+            body=body,
+        ).execute()
+        return True
+    except Exception as e:
+        print(f"❌ gs_append error ({rango}): {e}")
+        return False
+
+def gs_read(rango):
+    """Lee valores de un rango del Google Sheet."""
+    svc = _get_sheets_service()
+    if not svc: return []
+    try:
+        result = svc.spreadsheets().values().get(
+            spreadsheetId=GOOGLE_SHEETS_ID,
+            range=rango,
+        ).execute()
+        return result.get("values", [])
+    except Exception as e:
+        print(f"❌ gs_read error ({rango}): {e}")
+        return []
+
+def gs_clear(rango):
+    """Limpia un rango del Google Sheet."""
+    svc = _get_sheets_service()
+    if not svc: return False
+    try:
+        svc.spreadsheets().values().clear(
+            spreadsheetId=GOOGLE_SHEETS_ID,
+            range=rango,
+        ).execute()
+        return True
+    except Exception as e:
+        print(f"❌ gs_clear error ({rango}): {e}")
+        return False
+
+# ── Escritores específicos por hoja ──
+
+def gs_escribir_tasas(datos):
+    """
+    Escribe las tasas del día en la hoja TASAS.
+    Estructura: fila 4 = fecha/hora, filas 8-15 = tasas por fuente
+    """
+    if not USE_GOOGLE_SHEETS: return
+    try:
+        ahora = now_local()
+        fecha_str = ahora.strftime("%d/%m/%Y")
+        hora_str  = ahora.strftime("%H:%M")
+
+        # Fila 4: fecha y hora del registro
+        gs_write("TASAS!A4", [[fecha_str, hora_str]])
+
+        # Filas 8-15: tasas (Compra, Venta, Promedio, Hora)
+        # Col C=Compra, D=Venta, E=Promedio, F=Hora
+        tasas_filas = [
+            # [Compra, Venta, Promedio, Hora]
+            [datos.get("ban_bs_compra",""), datos.get("ban_bs_venta",""),
+             round(((datos.get("ban_bs_compra",0) or 0)+(datos.get("ban_bs_venta",0) or 0))/2,2), hora_str],  # Banesco
+            [datos.get("mer_bs_compra",""), datos.get("mer_bs_venta",""),
+             round(((datos.get("mer_bs_compra",0) or 0)+(datos.get("mer_bs_venta",0) or 0))/2,2), hora_str],  # Mercantil
+            [datos.get("trm",""), datos.get("trm",""), datos.get("trm",""), hora_str],        # TRM
+            [datos.get("dolar_obs",""), datos.get("dolar_obs",""), datos.get("dolar_obs",""), hora_str],  # Dólar Obs
+            [datos.get("bcv_usd",""), datos.get("bcv_usd",""), datos.get("bcv_usd",""), hora_str],        # BCV USD
+            [datos.get("bcv_eur",""), datos.get("bcv_eur",""), datos.get("bcv_eur",""), hora_str],        # BCV EUR
+            [datos.get("western",""), datos.get("western",""), datos.get("western",""), hora_str],        # Western
+            [datos.get("clp_compra",""), datos.get("clp_venta",""),
+             round(((datos.get("clp_compra",0) or 0)+(datos.get("clp_venta",0) or 0))/2,2), hora_str],  # Binance CLP
+        ]
+        gs_write("TASAS!C8", tasas_filas)
+        print(f"📊 Google Sheets TASAS actualizado — {hora_str}")
+    except Exception as e:
+        print(f"❌ gs_escribir_tasas: {e}")
+
+def gs_escribir_apertura(saldos_lista):
+    """
+    Escribe saldos iniciales en la hoja APERTURA.
+    Estructura: Col B = saldo, filas 7-22
+    """
+    if not USE_GOOGLE_SHEETS: return
+    try:
+        mapa = {
+            "COP_EFECTIVO":       7,
+            "USD_EFECTIVO":       8,
+            "BS_BANESCO":        11,
+            "BS_MERCANTIL":      12,
+            "CLP_COPEC_PAY":     15,
+            "CLP_BANCOESTADO":   16,
+            "COP_BANCOLOMBIA_C1":19,
+            "USDT_BINANCE":      21,
+            "USDC_AIRTM":        22,
+        }
+        for s in saldos_lista:
+            cuenta = s.get("cuenta","")
+            saldo  = s.get("saldo", 0)
+            fila   = mapa.get(cuenta)
+            if fila:
+                gs_write(f"APERTURA!B{fila}", [[saldo]])
+        print(f"📊 Google Sheets APERTURA actualizado")
+    except Exception as e:
+        print(f"❌ gs_escribir_apertura: {e}")
+
+def gs_escribir_operacion(op):
+    """
+    Agrega una operación en la hoja OPERACIONES.
+    Columnas: ID,FECHA,CLIENTE,REFERIDO,TIPO_OP,MON_ENT,MON_SAL,
+              MONTO_ENT,MONTO_SAL,TASA_CLIENTE,TASA_REF,USDT_EQUIV,
+              DIFERENCIAL,METODO,CORRESPONSAL,TITULAR,COM%,ENTREGA,
+              DELIVERY,TITULAR_DEL,MONTO_DEL,EMISOR,RECEPTOR,STATUS,OBS
+    """
+    if not USE_GOOGLE_SHEETS: return
+    try:
+        fila = [
+            op.get("id",""),
+            op.get("fecha",""),
+            op.get("cliente",""),
+            op.get("referido",""),
+            op.get("tipo_op",""),
+            op.get("mon_ent",""),
+            op.get("mon_sal",""),
+            op.get("monto_ent", 0),
+            op.get("monto_sal", 0),
+            op.get("tasa", 0),
+            "",  # tasa_ref — vacío por ahora
+            "",  # usdt_equiv — vacío, Excel lo calcula
+            "",  # diferencial — vacío, Excel lo calcula
+            op.get("metodo_pago",""),
+            op.get("tipo_corresp",""),
+            op.get("titular_corresp",""),
+            op.get("com_corresp", 0),
+            op.get("forma_entrega",""),
+            op.get("delivery",""),
+            op.get("titular_delivery",""),
+            op.get("monto_delivery", 0),
+            op.get("emisor",""),
+            op.get("receptor",""),
+            op.get("status",""),
+            op.get("observaciones",""),
+        ]
+        gs_append("OPERACIONES!A5", [fila])
+    except Exception as e:
+        print(f"❌ gs_escribir_operacion: {e}")
+
+def gs_escribir_cxc(cxc_lista):
+    """Escribe CXC pendientes en la hoja CXC."""
+    if not USE_GOOGLE_SHEETS: return
+    try:
+        # Limpiar desde fila 5
+        gs_clear("CXC!A5:J200")
+        ahora_str = now_local().strftime("%d/%m/%Y")
+        filas = []
+        for c in cxc_lista:
+            if c.get("status","") in ("Pendiente","Parcial"):
+                filas.append([
+                    ahora_str,
+                    c.get("cliente",""),
+                    c.get("concepto",""),
+                    c.get("monto", 0),
+                    c.get("moneda",""),
+                    "",   # equiv USDT — Excel calcula
+                    "",   # vencimiento
+                    "🟡 Esta semana",
+                    c.get("status","Pendiente"),
+                    "",   # días vencido
+                ])
+        if filas:
+            gs_write("CXC!A5", filas)
+        print(f"📊 Google Sheets CXC: {len(filas)} pendientes")
+    except Exception as e:
+        print(f"❌ gs_escribir_cxc: {e}")
+
+def gs_escribir_cxp(cxp_lista):
+    """Escribe CXP pendientes en la hoja CXP."""
+    if not USE_GOOGLE_SHEETS: return
+    try:
+        gs_clear("CXP!A5:J200")
+        ahora_str = now_local().strftime("%d/%m/%Y")
+        filas = []
+        for c in cxp_lista:
+            if c.get("status","") in ("Pendiente","Parcial"):
+                filas.append([
+                    ahora_str,
+                    c.get("acreedor",""),
+                    c.get("concepto",""),
+                    c.get("monto", 0),
+                    c.get("moneda",""),
+                    "",   # equiv USDT
+                    "",   # vencimiento
+                    "🟡 Esta semana",
+                    c.get("status","Pendiente"),
+                    "",   # días vencido
+                ])
+        if filas:
+            gs_write("CXP!A5", filas)
+        print(f"📊 Google Sheets CXP: {len(filas)} pendientes")
+    except Exception as e:
+        print(f"❌ gs_escribir_cxp: {e}")
+
+def gs_escribir_stock(op):
+    """
+    Agrega movimiento al STOCK por cada moneda involucrada en la op.
+    Columnas: ID,FECHA,TIPO_OP,MONEDA,DESCRIPCIÓN,ENTRADA,SALIDA,SALDO_CORRIDO,PRECIO_USDT,ORIGEN
+    """
+    if not USE_GOOGLE_SHEETS: return
+    try:
+        desc = f"{op.get('tipo_op','')} — {op.get('cliente','')}"
+        filas = []
+
+        # Movimiento moneda entrada (sale de tu caja)
+        if op.get("mon_ent") and op.get("monto_ent", 0) > 0:
+            filas.append([
+                op.get("id",""),
+                op.get("fecha",""),
+                op.get("tipo_op",""),
+                op.get("mon_ent",""),
+                desc,
+                "",                        # ENTRADA
+                op.get("monto_ent", 0),    # SALIDA
+                "",                        # saldo corrido (fórmula Excel)
+                op.get("tasa", 0),
+                "Relación Diaria",
+            ])
+
+        # Movimiento moneda salida (entra a tu caja o sale hacia cliente)
+        if op.get("mon_sal") and op.get("monto_sal", 0) > 0:
+            # Si emisor=USDT_BINANCE = sale de Binance
+            if op.get("emisor","") == "USDT_BINANCE":
+                filas.append([
+                    op.get("id",""),
+                    op.get("fecha",""),
+                    op.get("tipo_op",""),
+                    op.get("mon_sal",""),
+                    desc,
+                    "",
+                    op.get("monto_sal", 0),  # SALIDA
+                    "",
+                    op.get("tasa", 0),
+                    "Relación Diaria",
+                ])
+            elif op.get("receptor","") in ("CLP_COPEC_PAY","BS_BANESCO","BS_MERCANTIL","USDT_BINANCE"):
+                filas.append([
+                    op.get("id",""),
+                    op.get("fecha",""),
+                    op.get("tipo_op",""),
+                    op.get("mon_sal",""),
+                    desc,
+                    op.get("monto_sal", 0),  # ENTRADA
+                    "",
+                    "",
+                    op.get("tasa", 0),
+                    "Relación Diaria",
+                ])
+
+        if filas:
+            gs_append("STOCK!A24", filas)
+    except Exception as e:
+        print(f"❌ gs_escribir_stock: {e}")
+
+def gs_actualizar_relacion_diaria(resultado):
+    """
+    Punto de entrada principal: actualiza Google Sheets
+    con todos los datos de la Relación Diaria procesada.
+    """
+    if not USE_GOOGLE_SHEETS: return
+    print(f"📊 Actualizando Google Sheets...")
+
+    # 1. Saldos iniciales → APERTURA
+    gs_escribir_apertura(resultado.get("saldos", []))
+
+    # 2. Operaciones → OPERACIONES + STOCK
+    for op in resultado.get("operaciones", []):
+        gs_escribir_operacion(op)
+        gs_escribir_stock(op)
+
+    # 3. CXC y CXP
+    todas_cxc = resultado.get("cxc_dia", []) + resultado.get("cxc_mes_anterior", [])
+    todas_cxp = resultado.get("cxp_dia", []) + resultado.get("cxp_mes_anterior", [])
+    gs_escribir_cxc(todas_cxc)
+    gs_escribir_cxp(todas_cxp)
+
+    print(f"✅ Google Sheets actualizado completo")
+
 # ══════════════════════════════════════════════════════════════════════
 # FEES Y CONFIGURACIÓN DE NEGOCIO
 # ══════════════════════════════════════════════════════════════════════
@@ -3079,6 +3421,27 @@ def procesar(chat_id, texto):
             except Exception as e: send(chat_id,f"❌ Error: `{e}`")
         else: send(chat_id,"❌ USE_SUPABASE es False")
 
+    elif cmd == '/gstest':
+        send(chat_id, "⏳ Probando conexión Google Sheets...")
+        try:
+            svc = _get_sheets_service()
+            if not svc:
+                send(chat_id, "❌ Google Sheets no configurado.\nVerifica GOOGLE_SHEETS_ID y GOOGLE_SHEETS_CREDENTIALS en Railway.")
+            else:
+                resultado = gs_read("TASAS!A1")
+                ahora = now_local().strftime("%d/%m/%Y %H:%M")
+                gs_write("TASAS!A4", [[ahora, "Bot test OK"]])
+                sid = GOOGLE_SHEETS_ID[:20] if GOOGLE_SHEETS_ID else "?"
+                lec = resultado[0][0] if resultado else "OK"
+                m_gs = f"✅ *Google Sheets conectado*\n"
+                m_gs += f"Sheet ID: `{sid}...`\n"
+                m_gs += f"Lectura: `{lec}`\n"
+                m_gs += f"Escritura: celda TASAS!A4 actualizada\n"
+                m_gs += "_Abre el Sheet y verifica la fecha_"
+                send(chat_id, m_gs)
+        except Exception as _e:
+            send(chat_id, f"❌ Error Google Sheets:\n`{str(_e)[:200]}`")
+
     elif cmd in ('/ayuda','/start','/help'):
         send(chat_id,"""🤖 *GSA CAMBIOS v6.0 — COMANDOS*
 
@@ -4429,14 +4792,20 @@ def procesar_documento(chat_id, file_id, nombre):
                 print(f"📥 procesar_saldos_auxiliares completado")
             except Exception as _ae:
                 resultado['advertencias'].append(f"Saldos auxiliares: {_ae}")
-            # Sincronizar con Supabase en background
+            # Sincronizar con Supabase y Google Sheets en background
             import threading
             def _sync_bg():
                 try:
                     _sync_relacion_diaria_supabase(resultado, str(chat_id))
                 except Exception as _se:
                     print(f"Supabase sync error: {_se}")
+            def _gs_bg():
+                try:
+                    gs_actualizar_relacion_diaria(resultado)
+                except Exception as _ge:
+                    print(f"Google Sheets sync error: {_ge}")
             threading.Thread(target=_sync_bg, daemon=True).start()
+            threading.Thread(target=_gs_bg, daemon=True).start()
             print(f"📥 Enviando mensajes finales...")
             try:
                 msgs = formatear_resultado_relacion_diaria_partes(resultado, guardado)
@@ -7124,6 +7493,8 @@ def loop_tasas():
             datos = consultar_y_guardar(western_rate)
             ultimo_datos = datos
             send(TELEGRAM_CHAT_ID, construir_mensaje(datos, es_especial=es_especial))
+            # Actualizar Google Sheets TASAS en background
+            threading.Thread(target=gs_escribir_tasas, args=(datos,), daemon=True).start()
         except Exception as e:
             print(f"Error tasas: {e}")
 
