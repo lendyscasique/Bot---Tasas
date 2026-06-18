@@ -3980,12 +3980,14 @@ def procesar_documento(chat_id, file_id, nombre):
             send(chat_id, "❌ El archivo parece estar corrupto o no es un .xlsx válido.\n"
                          "Guárdalo en Excel como *Libro de Excel (.xlsx)* y vuelve a enviarlo.")
             return
+        print(f"📥 Formato OK — guardando en temp file")
     except Exception as _e_init:
         print(f"❌ Error en inicio de procesar_documento: {_e_init}")
         import traceback; print(traceback.format_exc())
         send(chat_id, f"❌ Error interno: {_e_init}")
         return
 
+    print(f"📥 Creando archivo temporal...")
     import tempfile
     if nombre_lower.endswith('.csv'):
         try:
@@ -4013,6 +4015,7 @@ def procesar_documento(chat_id, file_id, nombre):
 
     try:
         # Detectar tipo de archivo
+        print(f"📥 Detectando tipo de archivo...")
         from openpyxl import load_workbook as _lw2
         import re as _re
         _wb2 = _lw2(ruta_tmp, read_only=True)
@@ -4023,9 +4026,12 @@ def procesar_documento(chat_id, file_id, nombre):
             'SALDOS_INICIALES' in _hojas or
             any(_re.match(r'^\d{8}$', h) for h in _hojas)
         )
+        print(f"📥 Hojas: {_hojas} | es_relacion_diaria={es_relacion_diaria}")
 
         if es_relacion_diaria:
+            print(f"📥 Iniciando importar_relacion_diaria...")
             resultado = importar_relacion_diaria(ruta_tmp, chat_id)
+            print(f"📥 importar_relacion_diaria completado: {len(resultado.get('operaciones',[]))} ops")
             guardado  = guardar_relacion_diaria(resultado, chat_id)
             # Leer saldos auxiliares bancarios
             try:
