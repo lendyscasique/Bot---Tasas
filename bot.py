@@ -3376,11 +3376,17 @@ def leer_saldos_auxiliares(ruta_archivo, fecha_hoja):
 
 
 def calcular_saldo_cierre_binance(saldo_inicial_usdt, saldos_aux):
-    """Calcula saldo final USDT = inicial + acumulado neto (con fees) hasta fecha."""
+    """
+    Calcula saldo final USDT:
+    = saldo_inicial
+    + movimientos C2C acumulados (compras - ventas - fees)
+    + movimientos de ops diarias (Binance Pay, envíos directos)
+    """
     mov = saldos_aux.get('USDT_BINANCE', {})
-    compras_acum = mov.get('compras_acum', 0) or 0
-    ventas_acum  = mov.get('ventas_acum', 0) or 0
-    return round(saldo_inicial_usdt + compras_acum - ventas_acum, 6)
+    compras_acum  = mov.get('compras_acum', 0) or 0
+    ventas_acum   = mov.get('ventas_acum', 0) or 0
+    mov_ops       = mov.get('mov_ops_diarias', 0) or 0
+    return round(saldo_inicial_usdt + compras_acum - ventas_acum + mov_ops, 6)
 
 
 def formatear_saldos_cierre(saldos_aux, saldo_inicial_usdt=0, saldos_reales=None, fecha_cierre=None):
@@ -3436,8 +3442,16 @@ def formatear_saldos_cierre(saldos_aux, saldo_inicial_usdt=0, saldos_reales=None
             m += f"   Calculado:       `{saldo_calc:,.4f} USDT`\n"
             if compras_dia or ventas_dia:
                 cnt_dia = data.get("filas", 0)
-                m += f"   _Hoy: +{compras_dia:.4f} / -{ventas_dia:.4f} (fee {fees_dia:.4f}) | {cnt_dia} ords_\n"
-            m += f"   _({filas_acum} órdenes totales en auxiliar)_\n"
+                m += f"   _Hoy C2C: +{compras_dia:.4f} / -{ventas_dia:.4f} (fee {fees_dia:.4f}) | {cnt_dia} ords_\n"
+            # Mostrar ops diarias (Binance Pay etc)
+            mov_ops = data.get('mov_ops_diarias', 0) or 0
+            mov_det = data.get('mov_ops_detalle', []) or []
+            if mov_det:
+                m += f"   _Ops directas (Pay/envío):_\n"
+                for d in mov_det:
+                    signo = '+' if d['monto'] > 0 else ''
+                    m += f"   _{d['fecha']} {d['tipo_op']} {d['cliente']}: {signo}{d['monto']:.4f} USDT_\n"
+            m += f"   _({filas_acum} órdenes C2C en auxiliar)_\n"
         else:
             saldo_calc = data.get('saldo')
             filas = data.get('filas', 0)
@@ -3997,11 +4011,92 @@ def detectar_fecha_mas_reciente_auxiliares(ruta_archivo):
     return str(max(fechas_encontradas))
 
 
+def calcular_movimientos_usdt_ops_diarias(resultado, hasta_fecha=None):
+    """
+    Suma los movimientos USDT de las operaciones diarias que NO están
+    en el C2C de Binance (ej: Binance Pay, envíos directos, etc).
+    
+    Lógica:
+    - emisor=USDT_BINANCE y mon_sal=USDT → SALE USDT (resta)
+    - receptor=USDT_BINANCE y mon_sal=USDT → ENTRA USDT (suma)
+    - Solo operaciones Completadas
+    - Solo hasta la fecha indicada (inclusive)
+    
+    Retorna: {'total': float, 'detalle': [{'fecha','tipo_op','cliente','monto'}]}
+    """
+    from datetime import datetime as _dt
+
+    total = 0.0
+    detalle = []
+
+    import re as _re
+    ops_todas = resultado.get('operaciones', [])
+
+    def _sf(v):
+        if v is None: return 0.0
+        try: return float(str(v).replace(',','').strip())
+        except: return 0.0
+    def _ss(v): return str(v).strip() if v else ''
+
+    for op in ops_todas:
+        # Filtrar por fecha si se especifica
+        if hasta_fecha:
+            try:
+                f_op = _dt.strptime(op.get('fecha',''), '%Y-%m-%d').date()
+                f_lim = _dt.strptime(hasta_fecha, '%Y-%m-%d').date()
+                if f_op > f_lim:
+                    continue
+            except: pass
+
+        # Solo operaciones completadas
+        status = _ss(op.get('status',''))
+        if status not in ('Completada', 'Completado', ''):
+            continue
+
+        emisor   = _ss(op.get('emisor',''))
+        receptor = _ss(op.get('receptor',''))
+        mon_ent  = _ss(op.get('mon_ent',''))
+        mon_sal  = _ss(op.get('mon_sal',''))
+        mto_ent  = _sf(op.get('monto_ent', 0))
+        mto_sal  = _sf(op.get('monto_sal', 0))
+        tipo_op  = _ss(op.get('tipo_op',''))
+        cliente  = _ss(op.get('cliente',''))
+        fecha    = op.get('fecha','')
+
+        impacto = 0.0
+
+        if emisor == 'USDT_BINANCE':
+            # Sale USDT de Binance hacia el cliente o hacia otra cuenta
+            if mon_sal == 'USDT' and mto_sal > 0:
+                impacto = -mto_sal
+            elif mon_ent == 'USDT' and mto_ent > 0:
+                impacto = -mto_ent
+
+        elif receptor == 'USDT_BINANCE':
+            # Entra USDT a Binance desde el cliente u otra fuente
+            if mon_sal == 'USDT' and mto_sal > 0:
+                impacto = +mto_sal
+            elif mon_ent == 'USDT' and mto_ent > 0:
+                impacto = +mto_ent
+
+        if impacto != 0:
+            total += impacto
+            detalle.append({
+                'fecha': fecha,
+                'tipo_op': tipo_op,
+                'cliente': cliente,
+                'monto': impacto,
+            })
+            print(f"  📱 Op diaria USDT: {fecha} {tipo_op} {cliente} → {impacto:+.4f} USDT")
+
+    return {'total': round(total, 6), 'detalle': detalle}
+
+
 def procesar_saldos_auxiliares(ruta_archivo, resultado, guardado):
     """
     Lee saldos auxiliares y los agrega al resultado.
-    Usa la fecha más reciente disponible en los auxiliares,
-    no solo la fecha de la hoja diaria.
+    Combina movimientos del C2C Binance + ops diarias con USDT
+    (Binance Pay, envíos directos, etc.) para el saldo correcto.
     """
     fecha_hoja = resultado.get('fecha_hoja', '')
 
@@ -4019,13 +4114,21 @@ def procesar_saldos_auxiliares(ruta_archivo, resultado, guardado):
 
     saldos_aux = leer_saldos_auxiliares(ruta_archivo, fecha_calculo)
 
-    # Calcular saldo final USDT real
+    # Movimientos USDT de ops diarias (Binance Pay, envíos directos)
+    # que NO están en el C2C del auxiliar
+    mov_ops = calcular_movimientos_usdt_ops_diarias(resultado, hasta_fecha=fecha_calculo)
+    saldos_aux['USDT_BINANCE']['mov_ops_diarias'] = mov_ops['total']
+    saldos_aux['USDT_BINANCE']['mov_ops_detalle'] = mov_ops['detalle']
+    if mov_ops['detalle']:
+        print(f"  📱 Movimientos USDT ops diarias: {mov_ops['total']:+.4f} USDT ({len(mov_ops['detalle'])} ops)")
+
+    # Calcular saldo final USDT = C2C + ops diarias
     saldo_final_usdt = calcular_saldo_cierre_binance(saldo_inicial_usdt, saldos_aux)
     saldos_aux['USDT_BINANCE']['saldo_final'] = saldo_final_usdt
 
     resultado['saldos_cierre']      = saldos_aux
     resultado['saldo_inicial_usdt'] = saldo_inicial_usdt
-    resultado['fecha_cierre_aux']   = fecha_calculo  # puede ser distinta a fecha_hoja
+    resultado['fecha_cierre_aux']   = fecha_calculo
     return resultado
 
 
