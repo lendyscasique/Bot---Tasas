@@ -3885,6 +3885,92 @@ def procesar_saldos_auxiliares(ruta_archivo, resultado, guardado):
     return resultado
 
 
+
+def formatear_resultado_relacion_diaria_partes(resultado, guardado):
+    """Divide el resultado en mensajes más cortos para Telegram."""
+    fecha = resultado.get('fecha_hoja', '?')
+    errores = resultado.get('errores', [])
+
+    if errores:
+        return [f"❌ *Error:*\n" + "\n".join(f"• {e}" for e in errores)]
+
+    msgs = []
+
+    # MSG 1: Resumen general
+    m1 = f"✅ *RELACIÓN DIARIA PROCESADA*\n"
+    m1 += f"📅 Fecha: `{fecha}`\n"
+    m1 += "━━━━━━━━━━━━━━━━━━━━\n"
+    m1 += f"🏦 Saldos iniciales: {guardado['saldos']} cuentas\n"
+    m1 += f"📋 Operaciones: {guardado['operaciones']} registradas\n"
+    m1 += f"📥 CXC: {guardado['cxc']} por cobrar\n"
+    m1 += f"📤 CXP: {guardado['cxp']} por pagar\n"
+    m1 += f"💵 Orlando: {guardado['orlando']} movimientos\n"
+    m1 += f"🏛️ Bancolombia: {guardado['bancolombia']} movimientos\n"
+
+    # Operaciones
+    ops = resultado.get('operaciones', [])
+    if ops:
+        completadas = sum(1 for o in ops if o['status'] == 'Completada')
+        pendientes  = sum(1 for o in ops if 'Pendiente' in o['status'])
+        m1 += "━━━━━━━━━━━━━━━━━━━━\n"
+        m1 += f"📊 *Operaciones:*\n"
+        m1 += f"  ✅ Completadas: {completadas}\n"
+        if pendientes:
+            m1 += f"  ⚠️ Pendientes: {pendientes}\n"
+
+    msgs.append(m1)
+
+    # MSG 2: CXC y CXP pendientes
+    m2 = ""
+    cxc_vistas = set()
+    cxc_pend = []
+    for c in resultado.get('cxc_dia', []) + resultado.get('cxc_mes_anterior', []):
+        if c.get('status') == 'Pendiente':
+            key = (c.get('cliente',''), c.get('monto',0), c.get('moneda',''))
+            if key not in cxc_vistas:
+                cxc_vistas.add(key)
+                cxc_pend.append(c)
+    if cxc_pend:
+        m2 += f"📥 *CXC Pendientes:*\n"
+        for c in cxc_pend[:8]:
+            m2 += f"  • {c['cliente']}: `{c['monto']:,.2f} {c['moneda']}`\n"
+
+    cxp_vistas = set()
+    cxp_pend = []
+    for c in resultado.get('cxp_dia', []) + resultado.get('cxp_mes_anterior', []):
+        if c.get('status') == 'Pendiente':
+            key = (c.get('acreedor',''), c.get('monto',0), c.get('moneda',''))
+            if key not in cxp_vistas:
+                cxp_vistas.add(key)
+                cxp_pend.append(c)
+    if cxp_pend:
+        m2 += f"📤 *CXP Pendientes:*\n"
+        for c in cxp_pend[:5]:
+            m2 += f"  • {c['acreedor']}: `{c['monto']:,.2f} {c['moneda']}`\n"
+
+    if m2:
+        msgs.append(m2)
+
+    # MSG 3: Saldos de cierre
+    saldos_cierre = resultado.get('saldos_cierre')
+    if saldos_cierre:
+        saldo_usdt_ini = resultado.get('saldo_inicial_usdt', 0)
+        m3 = formatear_saldos_cierre(saldos_cierre, saldo_usdt_ini)
+        if m3:
+            msgs.append(m3)
+
+    # Advertencias
+    advertencias = resultado.get('advertencias', [])
+    if advertencias:
+        ma = f"⚠️ *Advertencias:*\n"
+        ma += "\n".join(f"  • {a}" for a in advertencias[:5])
+        msgs.append(ma)
+
+    # Footer
+    msgs[-1] += f"\n\n💾 _Datos guardados en Supabase_"
+
+    return msgs
+
 def formatear_resultado_relacion_diaria(resultado, guardado):
     """Formatea el resumen del procesamiento para Telegram."""
     fecha = resultado.get('fecha_hoja', '?')
@@ -4050,9 +4136,17 @@ def procesar_documento(chat_id, file_id, nombre):
                 except Exception as _se:
                     print(f"Supabase sync error: {_se}")
             threading.Thread(target=_sync_bg, daemon=True).start()
-            print(f"📥 Enviando mensaje final...")
-            send(chat_id, formatear_resultado_relacion_diaria(resultado, guardado))
-            print(f"📥 Mensaje enviado ✅")
+            print(f"📥 Enviando mensajes finales...")
+            try:
+                msgs = formatear_resultado_relacion_diaria_partes(resultado, guardado)
+                for i, msg in enumerate(msgs):
+                    send(chat_id, msg)
+                    print(f"📥 Mensaje {i+1}/{len(msgs)} enviado")
+                    import time; time.sleep(0.3)
+            except Exception as _me:
+                print(f"❌ Error enviando: {_me}")
+                send(chat_id, f"✅ Relación Diaria procesada: {guardado['operaciones']} ops, {guardado['cxc']} CXC, {guardado['cxp']} CXP")
+            print(f"📥 Mensajes enviados ✅")
             # Guardar para consulta posterior de saldo Binance
             if resultado.get('saldos_cierre'):
                 pendiente_saldo_binance[chat_id] = resultado
