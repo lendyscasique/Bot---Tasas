@@ -4032,10 +4032,14 @@ def procesar_documento(chat_id, file_id, nombre):
             print(f"📥 Iniciando importar_relacion_diaria...")
             resultado = importar_relacion_diaria(ruta_tmp, chat_id)
             print(f"📥 importar_relacion_diaria completado: {len(resultado.get('operaciones',[]))} ops")
+            print(f"📥 Iniciando guardar_relacion_diaria...")
             guardado  = guardar_relacion_diaria(resultado, chat_id)
+            print(f"📥 guardar_relacion_diaria completado: {guardado}")
             # Leer saldos auxiliares bancarios
+            print(f"📥 Iniciando procesar_saldos_auxiliares...")
             try:
                 resultado = procesar_saldos_auxiliares(ruta_tmp, resultado, guardado)
+                print(f"📥 procesar_saldos_auxiliares completado")
             except Exception as _ae:
                 resultado['advertencias'].append(f"Saldos auxiliares: {_ae}")
             # Sincronizar con Supabase en background
@@ -4046,7 +4050,9 @@ def procesar_documento(chat_id, file_id, nombre):
                 except Exception as _se:
                     print(f"Supabase sync error: {_se}")
             threading.Thread(target=_sync_bg, daemon=True).start()
+            print(f"📥 Enviando mensaje final...")
             send(chat_id, formatear_resultado_relacion_diaria(resultado, guardado))
+            print(f"📥 Mensaje enviado ✅")
             # Guardar para consulta posterior de saldo Binance
             if resultado.get('saldos_cierre'):
                 pendiente_saldo_binance[chat_id] = resultado
