@@ -3393,7 +3393,7 @@ def formatear_saldos_cierre(saldos_aux, saldo_inicial_usdt=0, saldos_reales=None
                     m += f"   Real banco: `{saldo_real:,.2f} {moneda}`\n"
                     m += f"   ❌ Diferencia: `{signo}{diff:,.2f} {moneda}`\n"
         elif cuenta == 'USDT_BINANCE' and cuenta not in saldos_reales:
-            m += f"   _⚠️ Usa /saldo_binance {{monto}} para comparar_\n"
+            m += f"   ⚠️ Usa /saldo\\_binance monto para comparar\n"
 
         m += "\n"
 
@@ -4150,22 +4150,29 @@ def procesar_documento(chat_id, file_id, nombre):
             try:
                 msgs = formatear_resultado_relacion_diaria_partes(resultado, guardado)
                 for i, msg in enumerate(msgs):
-                    # Último mensaje sin markdown por si tiene chars especiales
-                    if i == len(msgs) - 1:
-                        try:
-                            import requests as _rq
-                            _rq.post(f"{BASE_URL}/sendMessage", json={
+                    try:
+                        # Intentar siempre con Markdown y leer la respuesta
+                        r_send = requests.post(f"{BASE_URL}/sendMessage", json={
+                            "chat_id": chat_id,
+                            "text": msg,
+                            "parse_mode": "Markdown",
+                            "disable_web_page_preview": True
+                        }, timeout=10)
+                        resp_data = r_send.json()
+                        if not resp_data.get("ok"):
+                            # Markdown falló → reintentar sin formato (omitir parse_mode)
+                            print(f"⚠️ Markdown falló msg {i+1}: {resp_data.get('description','')} — reintentando sin formato")
+                            requests.post(f"{BASE_URL}/sendMessage", json={
                                 "chat_id": chat_id,
                                 "text": msg,
-                                "parse_mode": None
+                                "disable_web_page_preview": True
                             }, timeout=10)
-                            print(f"📥 Mensaje {i+1}/{len(msgs)} enviado (sin markdown)")
-                        except Exception as _se:
-                            print(f"❌ Error enviando msg {i+1}: {_se}")
-                    else:
-                        send(chat_id, msg)
-                        print(f"📥 Mensaje {i+1}/{len(msgs)} enviado")
-                    import time; time.sleep(0.5)
+                            print(f"📥 Mensaje {i+1}/{len(msgs)} enviado (fallback sin markdown)")
+                        else:
+                            print(f"📥 Mensaje {i+1}/{len(msgs)} enviado")
+                    except Exception as _se:
+                        print(f"❌ Error enviando msg {i+1}: {_se}")
+                    time.sleep(0.5)
             except Exception as _me:
                 print(f"❌ Error enviando: {_me}")
                 send(chat_id, f"✅ Relación Diaria procesada: {guardado['operaciones']} ops, {guardado['cxc']} CXC, {guardado['cxp']} CXP")
