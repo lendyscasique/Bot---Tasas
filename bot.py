@@ -4495,13 +4495,13 @@ def _sync_relacion_diaria_supabase(resultado, usuario):
             })
         try:
             r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/gsa_operaciones",
+                f"{SUPABASE_URL}/rest/v1/gsa_operaciones?on_conflict=fecha,cliente,tipo_op,monto_ent,monto_sal",
                 headers=headers, data=json.dumps(payload), timeout=15
             )
             if r.status_code not in (200, 201):
                 print(f"⚠️ Supabase gsa_operaciones: {r.status_code} {r.text[:200]}")
             else:
-                print(f"✅ Supabase gsa_operaciones: {len(payload)} filas")
+                print(f"✅ Supabase gsa_operaciones: {len(payload)} filas (upsert)")
         except Exception as e:
             print(f"❌ Supabase gsa_operaciones error: {e}")
 
@@ -4512,14 +4512,14 @@ def _sync_relacion_diaria_supabase(resultado, usuario):
                     'moneda': s.get('moneda',''), 'fecha': fecha} for s in saldos]
         try:
             r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/saldos_iniciales",
+                f"{SUPABASE_URL}/rest/v1/saldos_iniciales?on_conflict=cuenta",
                 headers={**headers, 'Prefer': 'resolution=merge-duplicates,return=minimal'},
                 data=json.dumps(payload), timeout=15
             )
             if r.status_code not in (200, 201, 204):
                 print(f"⚠️ Supabase saldos_iniciales: {r.status_code} {r.text[:200]}")
             else:
-                print(f"✅ Supabase saldos_iniciales: {len(payload)} filas")
+                print(f"✅ Supabase saldos_iniciales: {len(payload)} filas (upsert)")
         except Exception as e:
             print(f"❌ Supabase saldos_iniciales error: {e}")
 
@@ -4542,13 +4542,13 @@ def _sync_relacion_diaria_supabase(resultado, usuario):
         if payload:
             try:
                 r = requests.post(
-                    f"{SUPABASE_URL}/rest/v1/gsa_cxc",
+                    f"{SUPABASE_URL}/rest/v1/gsa_cxc?on_conflict=fecha,cliente,monto,moneda",
                     headers=headers, data=json.dumps(payload), timeout=15
                 )
                 if r.status_code not in (200, 201):
                     print(f"⚠️ Supabase gsa_cxc: {r.status_code} {r.text[:200]}")
                 else:
-                    print(f"✅ Supabase gsa_cxc: {len(payload)} filas")
+                    print(f"✅ Supabase gsa_cxc: {len(payload)} filas (upsert)")
             except Exception as e:
                 print(f"❌ Supabase gsa_cxc error: {e}")
 
@@ -4571,13 +4571,13 @@ def _sync_relacion_diaria_supabase(resultado, usuario):
         if payload:
             try:
                 r = requests.post(
-                    f"{SUPABASE_URL}/rest/v1/gsa_cxp",
+                    f"{SUPABASE_URL}/rest/v1/gsa_cxp?on_conflict=fecha,acreedor,monto,moneda",
                     headers=headers, data=json.dumps(payload), timeout=15
                 )
                 if r.status_code not in (200, 201):
                     print(f"⚠️ Supabase gsa_cxp: {r.status_code} {r.text[:200]}")
                 else:
-                    print(f"✅ Supabase gsa_cxp: {len(payload)} filas")
+                    print(f"✅ Supabase gsa_cxp: {len(payload)} filas (upsert)")
             except Exception as e:
                 print(f"❌ Supabase gsa_cxp error: {e}")
 
