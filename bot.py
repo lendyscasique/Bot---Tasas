@@ -3700,6 +3700,43 @@ def procesar(chat_id, texto):
             except Exception as e: send(chat_id,f"❌ Error: `{e}`")
         else: send(chat_id,"❌ USE_SUPABASE es False")
 
+    elif cmd == '/gsdebug':
+        send(chat_id, "⏳ Consultando Supabase directamente...")
+        try:
+            m_dbg = "🔍 *DEBUG SUPABASE*\n\n"
+            m_dbg += f"USE_SUPABASE: `{USE_SUPABASE}`\n"
+            m_dbg += f"SUPABASE_URL: `{SUPABASE_URL[:40] if SUPABASE_URL else 'vacío'}`\n\n"
+
+            tablas = ['gsa_operaciones', 'gsa_cxc', 'gsa_cxp', 'saldos_iniciales', 'tasas']
+            for tabla in tablas:
+                try:
+                    r = requests.get(
+                        f"{SUPABASE_URL}/rest/v1/{tabla}?select=*&limit=3",
+                        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                        timeout=10
+                    )
+                    cnt_r = requests.get(
+                        f"{SUPABASE_URL}/rest/v1/{tabla}?select=*",
+                        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                                "Prefer": "count=exact"},
+                        timeout=10
+                    )
+                    total = cnt_r.headers.get('content-range', '?/0').split('/')[-1]
+                    m_dbg += f"*{tabla}*: status=`{r.status_code}` total=`{total}`\n"
+                    if r.status_code == 200:
+                        data = r.json()
+                        if data:
+                            m_dbg += f"  Ejemplo: `{str(data[0])[:100]}`\n"
+                    else:
+                        m_dbg += f"  Error: `{r.text[:150]}`\n"
+                except Exception as _te:
+                    m_dbg += f"*{tabla}*: ❌ `{_te}`\n"
+                m_dbg += "\n"
+
+            send(chat_id, m_dbg)
+        except Exception as _e:
+            send(chat_id, f"❌ Error: {_e}")
+
     elif cmd == '/gssync':
         send(chat_id, "⏳ Sincronizando Google Sheets desde base de datos...\nEsto puede tomar 30-60 segundos.")
         def _sync_gs():
