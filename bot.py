@@ -426,6 +426,45 @@ def gs_sync_inicial():
     if not USE_GOOGLE_SHEETS:
         return "❌ Google Sheets no configurado."
 
+    # Asegurar que las tablas existan (por si la DB se reinició en Railway)
+    try:
+        conn = get_conn()
+        conn.execute("""CREATE TABLE IF NOT EXISTS gsa_operaciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT, tipo_op TEXT, mon_ent TEXT, mon_sal TEXT,
+            emisor TEXT, receptor TEXT, cliente TEXT, tasa REAL,
+            monto_ent REAL, monto_sal REAL, tipo_corresp TEXT,
+            titular_corresp TEXT, com_corresp REAL, referido TEXT,
+            delivery TEXT, monto_delivery REAL,
+            cxc_pendiente REAL, cxp_pendiente REAL,
+            status TEXT, observaciones TEXT, validado TEXT,
+            metodo_pago TEXT, forma_entrega TEXT,
+            importado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+            usuario TEXT)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS gsa_cxc (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT, cliente TEXT, concepto TEXT,
+            monto REAL, moneda TEXT, status TEXT,
+            origen TEXT, importado_en DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS gsa_cxp (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT, acreedor TEXT, concepto TEXT,
+            monto REAL, moneda TEXT, status TEXT,
+            origen TEXT, importado_en DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+        conn.commit()
+        conn.close()
+    except Exception as _e:
+        print(f"⚠️ gs_sync_inicial — error creando tablas: {_e}")
+
+    if USE_SUPABASE:
+        # Si la DB local está vacía pero Supabase tiene datos,
+        # avisar para que se restaure desde ahí en vez de reportar vacío
+        conn = get_conn()
+        cnt_local = conn.execute("SELECT COUNT(*) as c FROM gsa_operaciones").fetchone()['c']
+        conn.close()
+        if cnt_local == 0:
+            print("⚠️ gsa_operaciones local vacía — la DB de Railway se reinició. Revisa Supabase o vuelve a subir la Relación Diaria.")
+
     reporte = []
 
     # ── 1. TASAS ──
@@ -535,7 +574,7 @@ def gs_sync_inicial():
                 ok2 = gs_write("STOCK!A24", filas_stock)
                 reporte.append(f"✅ STOCK: {len(filas_stock)} movimientos" if ok2 else "❌ STOCK falló al escribir")
         else:
-            reporte.append("⚠️ Sin operaciones en gsa_operaciones — sube la Relación Diaria primero")
+            reporte.append("⚠️ Sin operaciones en gsa_operaciones\n   _La base de datos de Railway se reinició (almacenamiento efímero)._\n   _Vuelve a subir la Relación Diaria al bot para repoblar los datos._")
     except Exception as e:
         import traceback
         reporte.append(f"❌ OPERACIONES/STOCK error: {e}")
