@@ -4438,7 +4438,7 @@ def importar_relacion_diaria(ruta_archivo, chat_id):
 
 
 def _sync_relacion_diaria_supabase(resultado, usuario):
-    """Sincroniza la relación diaria con Supabase."""
+    """Sincroniza la relación diaria completa con Supabase: operaciones, saldos, CXC, CXP."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return
     import requests, json
@@ -4450,47 +4450,122 @@ def _sync_relacion_diaria_supabase(resultado, usuario):
     }
     fecha = resultado.get('fecha_hoja', '')
 
-    # Upsert operaciones
+    # ── Operaciones ──
     ops = resultado.get('operaciones', [])
     if ops:
         payload = []
         for op in ops:
             payload.append({
-                'fecha': fecha,
-                'tipo_op': op['tipo_op'],
-                'mon_ent': op['mon_ent'],
-                'mon_sal': op['mon_sal'],
-                'emisor': op['emisor'],
-                'receptor': op['receptor'],
-                'cliente': op['cliente'],
-                'tasa': op['tasa'],
-                'monto_ent': op['monto_ent'],
-                'monto_sal': op['monto_sal'],
-                'tipo_corresp': op['tipo_corresp'],
-                'titular_corresp': op['titular_corresp'],
-                'referido': op['referido'],
-                'status': op['status'],
-                'observaciones': op['observaciones'],
+                'fecha': op.get('fecha', fecha),
+                'tipo_op': op.get('tipo_op',''),
+                'mon_ent': op.get('mon_ent',''),
+                'mon_sal': op.get('mon_sal',''),
+                'emisor': op.get('emisor',''),
+                'receptor': op.get('receptor',''),
+                'cliente': op.get('cliente',''),
+                'tasa': op.get('tasa', 0),
+                'monto_ent': op.get('monto_ent', 0),
+                'monto_sal': op.get('monto_sal', 0),
+                'tipo_corresp': op.get('tipo_corresp',''),
+                'titular_corresp': op.get('titular_corresp',''),
+                'com_corresp': op.get('com_corresp', 0),
+                'referido': op.get('referido',''),
+                'delivery': op.get('delivery',''),
+                'monto_delivery': op.get('monto_delivery', 0),
+                'status': op.get('status',''),
+                'observaciones': op.get('observaciones',''),
+                'validado': op.get('validado',''),
+                'metodo_pago': op.get('metodo_pago',''),
+                'forma_entrega': op.get('forma_entrega',''),
                 'usuario': usuario,
             })
         try:
-            requests.post(
+            r = requests.post(
                 f"{SUPABASE_URL}/rest/v1/gsa_operaciones",
-                headers=headers, data=json.dumps(payload), timeout=10
+                headers=headers, data=json.dumps(payload), timeout=15
             )
-        except: pass
+            if r.status_code not in (200, 201):
+                print(f"⚠️ Supabase gsa_operaciones: {r.status_code} {r.text[:200]}")
+            else:
+                print(f"✅ Supabase gsa_operaciones: {len(payload)} filas")
+        except Exception as e:
+            print(f"❌ Supabase gsa_operaciones error: {e}")
 
-    # Upsert saldos
+    # ── Saldos iniciales ──
     saldos = resultado.get('saldos', [])
     if saldos:
         payload = [{'cuenta': s['cuenta'], 'saldo': s['saldo'],
-                    'moneda': s['moneda'], 'fecha': fecha} for s in saldos]
+                    'moneda': s.get('moneda',''), 'fecha': fecha} for s in saldos]
         try:
-            requests.post(
+            r = requests.post(
                 f"{SUPABASE_URL}/rest/v1/saldos_iniciales",
-                headers=headers, data=json.dumps(payload), timeout=10
+                headers={**headers, 'Prefer': 'resolution=merge-duplicates,return=minimal'},
+                data=json.dumps(payload), timeout=15
             )
-        except: pass
+            if r.status_code not in (200, 201, 204):
+                print(f"⚠️ Supabase saldos_iniciales: {r.status_code} {r.text[:200]}")
+            else:
+                print(f"✅ Supabase saldos_iniciales: {len(payload)} filas")
+        except Exception as e:
+            print(f"❌ Supabase saldos_iniciales error: {e}")
+
+    # ── CXC (día + mes anterior) ──
+    todas_cxc = resultado.get('cxc_dia', []) + resultado.get('cxc_mes_anterior', [])
+    if todas_cxc:
+        payload = []
+        for c in todas_cxc:
+            cliente = c.get('cliente','')
+            if not cliente: continue
+            payload.append({
+                'fecha': fecha,
+                'cliente': cliente,
+                'concepto': c.get('concepto',''),
+                'monto': c.get('monto', 0),
+                'moneda': c.get('moneda',''),
+                'status': c.get('status','Pendiente'),
+                'origen': 'dia' if c in resultado.get('cxc_dia', []) else 'mes_anterior',
+            })
+        if payload:
+            try:
+                r = requests.post(
+                    f"{SUPABASE_URL}/rest/v1/gsa_cxc",
+                    headers=headers, data=json.dumps(payload), timeout=15
+                )
+                if r.status_code not in (200, 201):
+                    print(f"⚠️ Supabase gsa_cxc: {r.status_code} {r.text[:200]}")
+                else:
+                    print(f"✅ Supabase gsa_cxc: {len(payload)} filas")
+            except Exception as e:
+                print(f"❌ Supabase gsa_cxc error: {e}")
+
+    # ── CXP (día + mes anterior) ──
+    todas_cxp = resultado.get('cxp_dia', []) + resultado.get('cxp_mes_anterior', [])
+    if todas_cxp:
+        payload = []
+        for c in todas_cxp:
+            acreedor = c.get('acreedor','')
+            if not acreedor: continue
+            payload.append({
+                'fecha': fecha,
+                'acreedor': acreedor,
+                'concepto': c.get('concepto',''),
+                'monto': c.get('monto', 0),
+                'moneda': c.get('moneda',''),
+                'status': c.get('status','Pendiente'),
+                'origen': 'dia' if c in resultado.get('cxp_dia', []) else 'mes_anterior',
+            })
+        if payload:
+            try:
+                r = requests.post(
+                    f"{SUPABASE_URL}/rest/v1/gsa_cxp",
+                    headers=headers, data=json.dumps(payload), timeout=15
+                )
+                if r.status_code not in (200, 201):
+                    print(f"⚠️ Supabase gsa_cxp: {r.status_code} {r.text[:200]}")
+                else:
+                    print(f"✅ Supabase gsa_cxp: {len(payload)} filas")
+            except Exception as e:
+                print(f"❌ Supabase gsa_cxp error: {e}")
 
 def guardar_relacion_diaria(resultado, chat_id):
     """Guarda el resultado del importador en SQLite y Supabase."""
