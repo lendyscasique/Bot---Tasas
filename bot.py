@@ -3707,6 +3707,20 @@ def procesar(chat_id, texto):
             m_dbg += f"USE_SUPABASE: `{USE_SUPABASE}`\n"
             m_dbg += f"SUPABASE_URL: `{SUPABASE_URL[:40] if SUPABASE_URL else 'vacío'}`\n\n"
 
+            # Probar insert directo a saldos_iniciales para ver el error real
+            try:
+                test_payload = [{'cuenta': 'TEST_DEBUG', 'saldo': 1.0, 'moneda': 'USD', 'fecha': '2026-01-01'}]
+                r_test = requests.post(
+                    f"{SUPABASE_URL}/rest/v1/saldos_iniciales",
+                    headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                            "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"},
+                    json=test_payload, timeout=10
+                )
+                m_dbg += f"*TEST INSERT saldos_iniciales*: status=`{r_test.status_code}`\n"
+                m_dbg += f"  Respuesta: `{r_test.text[:300]}`\n\n"
+            except Exception as _te2:
+                m_dbg += f"*TEST INSERT*: ❌ `{_te2}`\n\n"
+
             tablas = ['gsa_operaciones', 'gsa_cxc', 'gsa_cxp', 'saldos_iniciales', 'tasas']
             for tabla in tablas:
                 try:
