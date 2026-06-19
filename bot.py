@@ -218,7 +218,12 @@ def gs_escribir_tasas(datos):
 def gs_escribir_apertura(saldos_lista):
     """
     Escribe saldos iniciales en la hoja APERTURA en una sola llamada batch.
-    Estructura: Col B = saldo, filas 7-22 (ver mapa abajo)
+    Estructura real de la hoja:
+      Col B = CUENTA/MONEDA (nombre, no tocar)
+      Col C = SALDO INICIAL  ← aquí escribimos
+      Col D = TASA PATRIM.
+      Col E = VALOR USDT
+      Col F = FUENTE
     """
     if not USE_GOOGLE_SHEETS: return False
     try:
@@ -243,7 +248,7 @@ def gs_escribir_apertura(saldos_lista):
             fila   = mapa.get(cuenta)
             if fila:
                 data.append({
-                    "range": f"APERTURA!B{fila}",
+                    "range": f"APERTURA!C{fila}",
                     "values": [[saldo]],
                 })
         if not data:
@@ -3748,6 +3753,31 @@ def procesar(chat_id, texto):
                 m_dbg += "\n"
 
             send(chat_id, m_dbg)
+        except Exception as _e:
+            send(chat_id, f"❌ Error: {_e}")
+
+    elif cmd == '/gsfixapertura':
+        send(chat_id, "⏳ Restaurando nombres de cuenta en APERTURA...")
+        try:
+            nombres_apertura = {
+                7:  "Caja Pesos COP (Orlando — físico)",
+                8:  "Caja Dólares USD (físico)",
+                11: "BS — Banesco (Principal)",
+                12: "BS — Mercantil (Secundaria)",
+                15: "CLP — Copec Pay (Principal)",
+                16: "CLP — BancoEstado (Puente)",
+                19: "COP — Bancolombia (todas)",
+                21: "USDT — Binance",
+                22: "USDC — Airtm",
+            }
+            svc = _get_sheets_service()
+            data = [{"range": f"APERTURA!B{fila}", "values": [[nombre]]}
+                    for fila, nombre in nombres_apertura.items()]
+            body = {"valueInputOption": "USER_ENTERED", "data": data}
+            svc.spreadsheets().values().batchUpdate(
+                spreadsheetId=GOOGLE_SHEETS_ID, body=body
+            ).execute()
+            send(chat_id, f"✅ {len(data)} nombres de cuenta restaurados en APERTURA Col B")
         except Exception as _e:
             send(chat_id, f"❌ Error: {_e}")
 
