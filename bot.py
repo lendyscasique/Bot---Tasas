@@ -419,119 +419,100 @@ def gs_escribir_stock(op):
 
 def gs_sync_inicial():
     """
-    Sincronización inicial: vuelca todos los datos de Supabase/SQLite
-    hacia Google Sheets en UNA escritura por hoja (evita rate limits
-    y problemas de posición con append). Llamar con /gssync.
+    Sincronización inicial: vuelca todos los datos hacia Google Sheets
+    en UNA escritura por hoja. Usa Supabase como fuente principal
+    (persistente) con fallback a SQLite local si Supabase no responde.
+    Llamar con /gssync.
     """
     if not USE_GOOGLE_SHEETS:
         return "❌ Google Sheets no configurado."
 
-    # Asegurar que las tablas existan (por si la DB se reinició en Railway)
-    try:
-        conn = get_conn()
-        conn.execute("""CREATE TABLE IF NOT EXISTS gsa_operaciones (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fecha TEXT, tipo_op TEXT, mon_ent TEXT, mon_sal TEXT,
-            emisor TEXT, receptor TEXT, cliente TEXT, tasa REAL,
-            monto_ent REAL, monto_sal REAL, tipo_corresp TEXT,
-            titular_corresp TEXT, com_corresp REAL, referido TEXT,
-            delivery TEXT, monto_delivery REAL,
-            cxc_pendiente REAL, cxp_pendiente REAL,
-            status TEXT, observaciones TEXT, validado TEXT,
-            metodo_pago TEXT, forma_entrega TEXT,
-            importado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
-            usuario TEXT)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS gsa_cxc (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fecha TEXT, cliente TEXT, concepto TEXT,
-            monto REAL, moneda TEXT, status TEXT,
-            origen TEXT, importado_en DATETIME DEFAULT CURRENT_TIMESTAMP)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS gsa_cxp (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fecha TEXT, acreedor TEXT, concepto TEXT,
-            monto REAL, moneda TEXT, status TEXT,
-            origen TEXT, importado_en DATETIME DEFAULT CURRENT_TIMESTAMP)""")
-        conn.commit()
-        conn.close()
-    except Exception as _e:
-        print(f"⚠️ gs_sync_inicial — error creando tablas: {_e}")
-
-    if USE_SUPABASE:
-        # Si la DB local está vacía pero Supabase tiene datos,
-        # avisar para que se restaure desde ahí en vez de reportar vacío
-        conn = get_conn()
-        cnt_local = conn.execute("SELECT COUNT(*) as c FROM gsa_operaciones").fetchone()['c']
-        conn.close()
-        if cnt_local == 0:
-            print("⚠️ gsa_operaciones local vacía — la DB de Railway se reinició. Revisa Supabase o vuelve a subir la Relación Diaria.")
-
     reporte = []
+    fuente_usada = "Supabase" if USE_SUPABASE else "SQLite local"
+    reporte.append(f"_Fuente de datos: {fuente_usada}_")
+
+    def _sf(v):
+        if v is None: return 0.0
+        try: return float(str(v).replace(',','').strip())
+        except: return 0.0
+    def _ss(v): return str(v).strip() if v else ''
 
     # ── 1. TASAS ──
     try:
-        t = get_ultima_tasa()
+        t = {}
+        if USE_SUPABASE:
+            rows = supa_select('tasas', 'order=fecha_hora.desc&limit=1')
+            if rows: t = rows[0]
+        if not t:
+            t = get_ultima_tasa()
         if t:
             ok = gs_escribir_tasas(t)
-            reporte.append("✅ TASAS actualizada" if ok is not False else "❌ TASAS falló")
+            reporte.append("✅ TASAS actualizada" if ok else "❌ TASAS falló al escribir")
         else:
-            reporte.append("⚠️ Sin tasas en DB")
+            reporte.append("⚠️ Sin tasas disponibles")
     except Exception as e:
         reporte.append(f"❌ TASAS error: {e}")
 
     # ── 2. SALDOS → APERTURA ──
     try:
-        conn = get_conn()
-        saldos_ini = conn.execute("SELECT cuenta, saldo FROM saldos_iniciales").fetchall()
-        conn.close()
-        if saldos_ini:
-            saldos_lista = [{'cuenta': r['cuenta'], 'saldo': r['saldo']} for r in saldos_ini]
+        saldos_lista = []
+        if USE_SUPABASE:
+            rows = supa_select('saldos_iniciales', 'select=cuenta,saldo')
+            saldos_lista = [{'cuenta': r['cuenta'], 'saldo': r['saldo']} for r in rows]
+        if not saldos_lista:
+            conn = get_conn()
+            rows = conn.execute("SELECT cuenta, saldo FROM saldos_iniciales").fetchall()
+            conn.close()
+            saldos_lista = [{'cuenta': r['cuenta'], 'saldo': r['saldo']} for r in rows]
+
+        if saldos_lista:
             ok = gs_escribir_apertura(saldos_lista)
-            reporte.append(f"✅ APERTURA: {len(saldos_lista)} cuentas" if ok is not False else "❌ APERTURA falló")
+            reporte.append(f"✅ APERTURA: {len(saldos_lista)} cuentas" if ok else "❌ APERTURA falló")
         else:
-            reporte.append("⚠️ Sin saldos iniciales en DB")
+            reporte.append("⚠️ Sin saldos iniciales registrados")
     except Exception as e:
         reporte.append(f"❌ APERTURA error: {e}")
 
     # ── 3. OPERACIONES + STOCK ──
     try:
-        conn = get_conn()
-        ops = conn.execute("""
-            SELECT id, fecha, cliente, referido, tipo_op, mon_ent, mon_sal,
-                   monto_ent, monto_sal, tasa, metodo_pago, tipo_corresp,
-                   titular_corresp, com_corresp, forma_entrega, delivery,
-                   titular_delivery, monto_delivery, emisor, receptor,
-                   status, observaciones
-            FROM gsa_operaciones
-            ORDER BY fecha, id
-        """).fetchall()
-        conn.close()
+        ops = []
+        if USE_SUPABASE:
+            ops = supa_select('gsa_operaciones', 'order=fecha.asc')
+        if not ops:
+            try:
+                conn = get_conn()
+                rows = conn.execute("SELECT * FROM gsa_operaciones ORDER BY fecha, id").fetchall()
+                conn.close()
+                ops = [dict(r) for r in rows]
+            except Exception as _e2:
+                print(f"⚠️ SQLite gsa_operaciones no disponible: {_e2}")
+                ops = []
 
         if ops:
             filas_ops = []
             filas_stock = []
 
-            for r in ops:
-                op = dict(r)
+            for op in ops:
                 fila = [
-                    op.get('id',''),
-                    op.get('fecha',''),
-                    op.get('cliente',''),
+                    op.get('id','') or '',
+                    op.get('fecha','') or '',
+                    op.get('cliente','') or '',
                     op.get('referido','') or '',
-                    op.get('tipo_op',''),
+                    op.get('tipo_op','') or '',
                     op.get('mon_ent','') or '',
                     op.get('mon_sal','') or '',
-                    op.get('monto_ent', 0) or 0,
-                    op.get('monto_sal', 0) or 0,
-                    op.get('tasa', 0) or 0,
+                    _sf(op.get('monto_ent', 0)),
+                    _sf(op.get('monto_sal', 0)),
+                    _sf(op.get('tasa', 0)),
                     '', '', '',  # tasa_ref, usdt_equiv, diferencial (Excel calcula)
                     op.get('metodo_pago','') or '',
                     op.get('tipo_corresp','') or '',
                     op.get('titular_corresp','') or '',
-                    op.get('com_corresp', 0) or 0,
+                    _sf(op.get('com_corresp', 0)),
                     op.get('forma_entrega','') or '',
                     op.get('delivery','') or '',
                     op.get('titular_delivery','') or '',
-                    op.get('monto_delivery', 0) or 0,
+                    _sf(op.get('monto_delivery', 0)),
                     op.get('emisor','') or '',
                     op.get('receptor','') or '',
                     op.get('status','') or '',
@@ -540,29 +521,32 @@ def gs_sync_inicial():
                 filas_ops.append(fila)
 
                 desc = f"{op.get('tipo_op','')} — {op.get('cliente','')}"
-                if op.get('mon_ent') and (op.get('monto_ent') or 0) > 0:
+                monto_ent = _sf(op.get('monto_ent', 0))
+                monto_sal = _sf(op.get('monto_sal', 0))
+
+                if op.get('mon_ent') and monto_ent > 0:
                     filas_stock.append([
-                        op.get('id',''), op.get('fecha',''), op.get('tipo_op',''),
-                        op.get('mon_ent',''), desc, '', op.get('monto_ent', 0),
-                        '', op.get('tasa', 0) or 0, 'Relación Diaria',
+                        op.get('id','') or '', op.get('fecha','') or '', op.get('tipo_op','') or '',
+                        op.get('mon_ent','') or '', desc, '', monto_ent,
+                        '', _sf(op.get('tasa', 0)), 'Relación Diaria',
                     ])
 
-                if op.get('mon_sal') and (op.get('monto_sal') or 0) > 0:
+                if op.get('mon_sal') and monto_sal > 0:
                     emisor = op.get('emisor','') or ''
                     receptor = op.get('receptor','') or ''
                     cuentas_caja = ('CLP_COPEC_PAY','BS_BANESCO','BS_MERCANTIL',
                                     'USDT_BINANCE','USDC_AIRTM')
                     if receptor in cuentas_caja:
                         filas_stock.append([
-                            op.get('id',''), op.get('fecha',''), op.get('tipo_op',''),
-                            op.get('mon_sal',''), desc, op.get('monto_sal', 0),
-                            '', '', op.get('tasa', 0) or 0, 'Relación Diaria',
+                            op.get('id','') or '', op.get('fecha','') or '', op.get('tipo_op','') or '',
+                            op.get('mon_sal','') or '', desc, monto_sal,
+                            '', '', _sf(op.get('tasa', 0)), 'Relación Diaria',
                         ])
                     elif emisor in cuentas_caja:
                         filas_stock.append([
-                            op.get('id',''), op.get('fecha',''), op.get('tipo_op',''),
-                            op.get('mon_sal',''), desc, '', op.get('monto_sal', 0),
-                            '', op.get('tasa', 0) or 0, 'Relación Diaria',
+                            op.get('id','') or '', op.get('fecha','') or '', op.get('tipo_op','') or '',
+                            op.get('mon_sal','') or '', desc, '', monto_sal,
+                            '', _sf(op.get('tasa', 0)), 'Relación Diaria',
                         ])
 
             gs_clear("OPERACIONES!A5:Y500")
@@ -574,7 +558,10 @@ def gs_sync_inicial():
                 ok2 = gs_write("STOCK!A24", filas_stock)
                 reporte.append(f"✅ STOCK: {len(filas_stock)} movimientos" if ok2 else "❌ STOCK falló al escribir")
         else:
-            reporte.append("⚠️ Sin operaciones en gsa_operaciones\n   _La base de datos de Railway se reinició (almacenamiento efímero)._\n   _Vuelve a subir la Relación Diaria al bot para repoblar los datos._")
+            reporte.append(
+                "⚠️ Sin operaciones registradas\n"
+                "   _Sube la Relación Diaria al bot para cargar operaciones._"
+            )
     except Exception as e:
         import traceback
         reporte.append(f"❌ OPERACIONES/STOCK error: {e}")
@@ -582,20 +569,26 @@ def gs_sync_inicial():
 
     # ── 4. CXC ──
     try:
-        conn = get_conn()
-        cxc_rows = conn.execute("""
-            SELECT fecha, cliente, concepto, monto, moneda, status
-            FROM gsa_cxc WHERE status='Pendiente'
-            ORDER BY fecha DESC
-        """).fetchall()
-        conn.close()
+        cxc_rows = []
+        if USE_SUPABASE:
+            cxc_rows = supa_select('gsa_cxc', "status=eq.Pendiente&order=fecha.desc")
+        if not cxc_rows:
+            try:
+                conn = get_conn()
+                rows = conn.execute("""
+                    SELECT fecha, cliente, concepto, monto, moneda, status
+                    FROM gsa_cxc WHERE status='Pendiente' ORDER BY fecha DESC
+                """).fetchall()
+                conn.close()
+                cxc_rows = [dict(r) for r in rows]
+            except: cxc_rows = []
 
         if cxc_rows:
             ahora_str = now_local().strftime("%d/%m/%Y")
             filas_cxc = [[
-                r['fecha'] or ahora_str, r['cliente'], r['concepto'],
-                r['monto'], r['moneda'], '', '', '🟡 Esta semana',
-                r['status'], ''
+                r.get('fecha') or ahora_str, r.get('cliente',''), r.get('concepto',''),
+                _sf(r.get('monto', 0)), r.get('moneda',''), '', '', '🟡 Esta semana',
+                r.get('status','Pendiente'), ''
             ] for r in cxc_rows]
             gs_clear("CXC!A5:J200")
             ok = gs_write("CXC!A5", filas_cxc)
@@ -607,20 +600,26 @@ def gs_sync_inicial():
 
     # ── 5. CXP ──
     try:
-        conn = get_conn()
-        cxp_rows = conn.execute("""
-            SELECT fecha, acreedor, concepto, monto, moneda, status
-            FROM gsa_cxp WHERE status='Pendiente'
-            ORDER BY fecha DESC
-        """).fetchall()
-        conn.close()
+        cxp_rows = []
+        if USE_SUPABASE:
+            cxp_rows = supa_select('gsa_cxp', "status=eq.Pendiente&order=fecha.desc")
+        if not cxp_rows:
+            try:
+                conn = get_conn()
+                rows = conn.execute("""
+                    SELECT fecha, acreedor, concepto, monto, moneda, status
+                    FROM gsa_cxp WHERE status='Pendiente' ORDER BY fecha DESC
+                """).fetchall()
+                conn.close()
+                cxp_rows = [dict(r) for r in rows]
+            except: cxp_rows = []
 
         if cxp_rows:
             ahora_str = now_local().strftime("%d/%m/%Y")
             filas_cxp = [[
-                r['fecha'] or ahora_str, r['acreedor'], r['concepto'],
-                r['monto'], r['moneda'], '', '', '🟡 Esta semana',
-                r['status'], ''
+                r.get('fecha') or ahora_str, r.get('acreedor',''), r.get('concepto',''),
+                _sf(r.get('monto', 0)), r.get('moneda',''), '', '', '🟡 Esta semana',
+                r.get('status','Pendiente'), ''
             ] for r in cxp_rows]
             gs_clear("CXP!A5:J200")
             ok = gs_write("CXP!A5", filas_cxp)
@@ -630,7 +629,7 @@ def gs_sync_inicial():
     except Exception as e:
         reporte.append(f"❌ CXP error: {e}")
 
-    # ── 6. GASTOS ──
+    # ── 6. GASTOS (solo SQLite por ahora, no se sincroniza a Supabase) ──
     try:
         conn = get_conn()
         gastos = conn.execute("""
@@ -647,9 +646,9 @@ def gs_sync_inicial():
             ok = gs_write("GASTOS!A6", filas_g)
             reporte.append(f"✅ GASTOS: {len(gastos)} registros" if ok else "❌ GASTOS falló")
     except Exception as e:
-        reporte.append(f"❌ GASTOS error: {e}")
+        print(f"⚠️ GASTOS no disponible: {e}")
 
-    # ── 7. CLIENTES ──
+    # ── 7. CLIENTES (solo SQLite por ahora) ──
     try:
         conn = get_conn()
         clientes = conn.execute("""
@@ -668,7 +667,7 @@ def gs_sync_inicial():
             ok = gs_write("CLIENTES!A5", filas_cl)
             reporte.append(f"✅ CLIENTES: {len(clientes)} registros" if ok else "❌ CLIENTES falló")
     except Exception as e:
-        reporte.append(f"❌ CLIENTES error: {e}")
+        print(f"⚠️ CLIENTES no disponible: {e}")
 
     return "\n".join(reporte)
 
