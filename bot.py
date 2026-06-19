@@ -175,45 +175,52 @@ def gs_clear(rango):
 
 def gs_escribir_tasas(datos):
     """
-    Escribe las tasas del día en la hoja TASAS.
+    Escribe las tasas del día en la hoja TASAS en una sola llamada batch.
     Estructura: fila 4 = fecha/hora, filas 8-15 = tasas por fuente
     """
-    if not USE_GOOGLE_SHEETS: return
+    if not USE_GOOGLE_SHEETS: return False
     try:
+        svc = _get_sheets_service()
+        if not svc: return False
+
         ahora = now_local()
         fecha_str = ahora.strftime("%d/%m/%Y")
         hora_str  = ahora.strftime("%H:%M")
 
-        # Fila 4: fecha y hora del registro
-        gs_write("TASAS!A4", [[fecha_str, hora_str]])
-
-        # Filas 8-15: tasas (Compra, Venta, Promedio, Hora)
-        # Col C=Compra, D=Venta, E=Promedio, F=Hora
         tasas_filas = [
-            # [Compra, Venta, Promedio, Hora]
             [datos.get("ban_bs_compra",""), datos.get("ban_bs_venta",""),
-             round(((datos.get("ban_bs_compra",0) or 0)+(datos.get("ban_bs_venta",0) or 0))/2,2), hora_str],  # Banesco
+             round(((datos.get("ban_bs_compra",0) or 0)+(datos.get("ban_bs_venta",0) or 0))/2,2), hora_str],
             [datos.get("mer_bs_compra",""), datos.get("mer_bs_venta",""),
-             round(((datos.get("mer_bs_compra",0) or 0)+(datos.get("mer_bs_venta",0) or 0))/2,2), hora_str],  # Mercantil
-            [datos.get("trm",""), datos.get("trm",""), datos.get("trm",""), hora_str],        # TRM
-            [datos.get("dolar_obs",""), datos.get("dolar_obs",""), datos.get("dolar_obs",""), hora_str],  # Dólar Obs
-            [datos.get("bcv_usd",""), datos.get("bcv_usd",""), datos.get("bcv_usd",""), hora_str],        # BCV USD
-            [datos.get("bcv_eur",""), datos.get("bcv_eur",""), datos.get("bcv_eur",""), hora_str],        # BCV EUR
-            [datos.get("western",""), datos.get("western",""), datos.get("western",""), hora_str],        # Western
+             round(((datos.get("mer_bs_compra",0) or 0)+(datos.get("mer_bs_venta",0) or 0))/2,2), hora_str],
+            [datos.get("trm",""), datos.get("trm",""), datos.get("trm",""), hora_str],
+            [datos.get("dolar_obs",""), datos.get("dolar_obs",""), datos.get("dolar_obs",""), hora_str],
+            [datos.get("bcv_usd",""), datos.get("bcv_usd",""), datos.get("bcv_usd",""), hora_str],
+            [datos.get("bcv_eur",""), datos.get("bcv_eur",""), datos.get("bcv_eur",""), hora_str],
+            [datos.get("western",""), datos.get("western",""), datos.get("western",""), hora_str],
             [datos.get("clp_compra",""), datos.get("clp_venta",""),
-             round(((datos.get("clp_compra",0) or 0)+(datos.get("clp_venta",0) or 0))/2,2), hora_str],  # Binance CLP
+             round(((datos.get("clp_compra",0) or 0)+(datos.get("clp_venta",0) or 0))/2,2), hora_str],
         ]
-        gs_write("TASAS!C8", tasas_filas)
+
+        data = [
+            {"range": "TASAS!A4", "values": [[fecha_str, hora_str]]},
+            {"range": "TASAS!C8", "values": tasas_filas},
+        ]
+        body = {"valueInputOption": "USER_ENTERED", "data": data}
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=GOOGLE_SHEETS_ID, body=body
+        ).execute()
         print(f"📊 Google Sheets TASAS actualizado — {hora_str}")
+        return True
     except Exception as e:
         print(f"❌ gs_escribir_tasas: {e}")
+        return False
 
 def gs_escribir_apertura(saldos_lista):
     """
-    Escribe saldos iniciales en la hoja APERTURA.
-    Estructura: Col B = saldo, filas 7-22
+    Escribe saldos iniciales en la hoja APERTURA en una sola llamada batch.
+    Estructura: Col B = saldo, filas 7-22 (ver mapa abajo)
     """
-    if not USE_GOOGLE_SHEETS: return
+    if not USE_GOOGLE_SHEETS: return False
     try:
         mapa = {
             "COP_EFECTIVO":       7,
@@ -226,15 +233,32 @@ def gs_escribir_apertura(saldos_lista):
             "USDT_BINANCE":      21,
             "USDC_AIRTM":        22,
         }
+        svc = _get_sheets_service()
+        if not svc: return False
+
+        data = []
         for s in saldos_lista:
             cuenta = s.get("cuenta","")
             saldo  = s.get("saldo", 0)
             fila   = mapa.get(cuenta)
             if fila:
-                gs_write(f"APERTURA!B{fila}", [[saldo]])
-        print(f"📊 Google Sheets APERTURA actualizado")
+                data.append({
+                    "range": f"APERTURA!B{fila}",
+                    "values": [[saldo]],
+                })
+        if not data:
+            print("⚠️ gs_escribir_apertura: ninguna cuenta coincidió con el mapa")
+            return False
+
+        body = {"valueInputOption": "USER_ENTERED", "data": data}
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=GOOGLE_SHEETS_ID, body=body
+        ).execute()
+        print(f"📊 Google Sheets APERTURA actualizado ({len(data)} cuentas)")
+        return True
     except Exception as e:
         print(f"❌ gs_escribir_apertura: {e}")
+        return False
 
 def gs_escribir_operacion(op):
     """
@@ -395,186 +419,199 @@ def gs_escribir_stock(op):
 
 def gs_sync_inicial():
     """
-    Sincronización inicial: vuelca todos los datos de Supabase
-    hacia Google Sheets. Llamar una vez con /gssync.
+    Sincronización inicial: vuelca todos los datos de Supabase/SQLite
+    hacia Google Sheets en UNA escritura por hoja (evita rate limits
+    y problemas de posición con append). Llamar con /gssync.
     """
     if not USE_GOOGLE_SHEETS:
         return "❌ Google Sheets no configurado."
 
     reporte = []
 
+    # ── 1. TASAS ──
     try:
-        # ── 1. TASAS — última tasa disponible ──
         t = get_ultima_tasa()
         if t:
-            gs_escribir_tasas(t)
-            reporte.append("✅ TASAS actualizada")
+            ok = gs_escribir_tasas(t)
+            reporte.append("✅ TASAS actualizada" if ok is not False else "❌ TASAS falló")
         else:
             reporte.append("⚠️ Sin tasas en DB")
+    except Exception as e:
+        reporte.append(f"❌ TASAS error: {e}")
 
-        # ── 2. SALDOS → APERTURA ──
+    # ── 2. SALDOS → APERTURA ──
+    try:
         conn = get_conn()
-        saldos_ini = conn.execute(
-            "SELECT cuenta, saldo FROM saldos_iniciales"
-        ).fetchall()
+        saldos_ini = conn.execute("SELECT cuenta, saldo FROM saldos_iniciales").fetchall()
         conn.close()
         if saldos_ini:
             saldos_lista = [{'cuenta': r['cuenta'], 'saldo': r['saldo']} for r in saldos_ini]
-            gs_escribir_apertura(saldos_lista)
-            reporte.append(f"✅ APERTURA: {len(saldos_lista)} cuentas")
+            ok = gs_escribir_apertura(saldos_lista)
+            reporte.append(f"✅ APERTURA: {len(saldos_lista)} cuentas" if ok is not False else "❌ APERTURA falló")
         else:
             reporte.append("⚠️ Sin saldos iniciales en DB")
+    except Exception as e:
+        reporte.append(f"❌ APERTURA error: {e}")
 
-        # ── 3. OPERACIONES + STOCK → desde gsa_operaciones ──
+    # ── 3. OPERACIONES + STOCK ──
+    try:
         conn = get_conn()
         ops = conn.execute("""
-            SELECT * FROM gsa_operaciones
-            ORDER BY fecha, rowid
+            SELECT id, fecha, cliente, referido, tipo_op, mon_ent, mon_sal,
+                   monto_ent, monto_sal, tasa, metodo_pago, tipo_corresp,
+                   titular_corresp, com_corresp, forma_entrega, delivery,
+                   titular_delivery, monto_delivery, emisor, receptor,
+                   status, observaciones
+            FROM gsa_operaciones
+            ORDER BY fecha, id
         """).fetchall()
         conn.close()
 
         if ops:
-            # Limpiar hoja OPERACIONES antes de escribir
-            gs_clear("OPERACIONES!A5:Z500")
-            gs_clear("STOCK!A24:J600")
-
             filas_ops = []
-            for op in ops:
-                op = dict(op)
+            filas_stock = []
+
+            for r in ops:
+                op = dict(r)
                 fila = [
-                    op.get('rowid',''),
+                    op.get('id',''),
                     op.get('fecha',''),
                     op.get('cliente',''),
-                    op.get('referido',''),
+                    op.get('referido','') or '',
                     op.get('tipo_op',''),
-                    op.get('mon_ent',''),
-                    op.get('mon_sal',''),
-                    op.get('monto_ent', 0),
-                    op.get('monto_sal', 0),
-                    op.get('tasa', 0),
-                    '',  # tasa_ref
-                    '',  # usdt_equiv
-                    '',  # diferencial
-                    op.get('metodo_pago',''),
-                    op.get('tipo_corresp',''),
-                    op.get('titular_corresp',''),
-                    op.get('com_corresp', 0),
-                    op.get('forma_entrega',''),
-                    op.get('delivery',''),
-                    op.get('titular_delivery',''),
-                    op.get('monto_delivery', 0),
-                    op.get('emisor',''),
-                    op.get('receptor',''),
-                    op.get('status',''),
-                    op.get('observaciones',''),
+                    op.get('mon_ent','') or '',
+                    op.get('mon_sal','') or '',
+                    op.get('monto_ent', 0) or 0,
+                    op.get('monto_sal', 0) or 0,
+                    op.get('tasa', 0) or 0,
+                    '', '', '',  # tasa_ref, usdt_equiv, diferencial (Excel calcula)
+                    op.get('metodo_pago','') or '',
+                    op.get('tipo_corresp','') or '',
+                    op.get('titular_corresp','') or '',
+                    op.get('com_corresp', 0) or 0,
+                    op.get('forma_entrega','') or '',
+                    op.get('delivery','') or '',
+                    op.get('titular_delivery','') or '',
+                    op.get('monto_delivery', 0) or 0,
+                    op.get('emisor','') or '',
+                    op.get('receptor','') or '',
+                    op.get('status','') or '',
+                    op.get('observaciones','') or '',
                 ]
                 filas_ops.append(fila)
 
-                # Stock: movimiento de moneda entrada (salida de caja)
-                if op.get('mon_ent') and op.get('monto_ent', 0) > 0:
-                    gs_append("STOCK!A24", [[
-                        op.get('rowid',''), op.get('fecha',''),
-                        op.get('tipo_op',''), op.get('mon_ent',''),
-                        f"{op.get('tipo_op','')} — {op.get('cliente','')}",
-                        '', op.get('monto_ent', 0), '', op.get('tasa', 0),
-                        'Relación Diaria',
-                    ]])
+                desc = f"{op.get('tipo_op','')} — {op.get('cliente','')}"
+                if op.get('mon_ent') and (op.get('monto_ent') or 0) > 0:
+                    filas_stock.append([
+                        op.get('id',''), op.get('fecha',''), op.get('tipo_op',''),
+                        op.get('mon_ent',''), desc, '', op.get('monto_ent', 0),
+                        '', op.get('tasa', 0) or 0, 'Relación Diaria',
+                    ])
 
-                # Stock: movimiento de moneda salida (entrada a caja o salida)
-                if op.get('mon_sal') and op.get('monto_sal', 0) > 0:
-                    emisor = op.get('emisor','')
-                    receptor = op.get('receptor','')
-                    es_entrada = receptor in ('CLP_COPEC_PAY','BS_BANESCO',
-                                              'BS_MERCANTIL','USDT_BINANCE','USDC_AIRTM')
-                    es_salida  = emisor in ('CLP_COPEC_PAY','BS_BANESCO',
-                                            'BS_MERCANTIL','USDT_BINANCE','USDC_AIRTM')
-                    if es_entrada:
-                        gs_append("STOCK!A24", [[
-                            op.get('rowid',''), op.get('fecha',''),
-                            op.get('tipo_op',''), op.get('mon_sal',''),
-                            f"{op.get('tipo_op','')} — {op.get('cliente','')}",
-                            op.get('monto_sal', 0), '', '', op.get('tasa', 0),
-                            'Relación Diaria',
-                        ]])
-                    elif es_salida:
-                        gs_append("STOCK!A24", [[
-                            op.get('rowid',''), op.get('fecha',''),
-                            op.get('tipo_op',''), op.get('mon_sal',''),
-                            f"{op.get('tipo_op','')} — {op.get('cliente','')}",
-                            '', op.get('monto_sal', 0), '', op.get('tasa', 0),
-                            'Relación Diaria',
-                        ]])
+                if op.get('mon_sal') and (op.get('monto_sal') or 0) > 0:
+                    emisor = op.get('emisor','') or ''
+                    receptor = op.get('receptor','') or ''
+                    cuentas_caja = ('CLP_COPEC_PAY','BS_BANESCO','BS_MERCANTIL',
+                                    'USDT_BINANCE','USDC_AIRTM')
+                    if receptor in cuentas_caja:
+                        filas_stock.append([
+                            op.get('id',''), op.get('fecha',''), op.get('tipo_op',''),
+                            op.get('mon_sal',''), desc, op.get('monto_sal', 0),
+                            '', '', op.get('tasa', 0) or 0, 'Relación Diaria',
+                        ])
+                    elif emisor in cuentas_caja:
+                        filas_stock.append([
+                            op.get('id',''), op.get('fecha',''), op.get('tipo_op',''),
+                            op.get('mon_sal',''), desc, '', op.get('monto_sal', 0),
+                            '', op.get('tasa', 0) or 0, 'Relación Diaria',
+                        ])
 
-            # Escribir todas las ops de una vez
-            if filas_ops:
-                gs_write("OPERACIONES!A5", filas_ops)
-            reporte.append(f"✅ OPERACIONES: {len(ops)} registros")
-            reporte.append(f"✅ STOCK: movimientos escritos")
+            gs_clear("OPERACIONES!A5:Y500")
+            ok1 = gs_write("OPERACIONES!A5", filas_ops)
+            reporte.append(f"✅ OPERACIONES: {len(filas_ops)} filas" if ok1 else "❌ OPERACIONES falló al escribir")
+
+            if filas_stock:
+                gs_clear("STOCK!A24:J600")
+                ok2 = gs_write("STOCK!A24", filas_stock)
+                reporte.append(f"✅ STOCK: {len(filas_stock)} movimientos" if ok2 else "❌ STOCK falló al escribir")
         else:
-            reporte.append("⚠️ Sin operaciones en DB — sube la Relación Diaria primero")
+            reporte.append("⚠️ Sin operaciones en gsa_operaciones — sube la Relación Diaria primero")
+    except Exception as e:
+        import traceback
+        reporte.append(f"❌ OPERACIONES/STOCK error: {e}")
+        print(traceback.format_exc())
 
-        # ── 4. CXC desde gsa_cxc ──
+    # ── 4. CXC ──
+    try:
         conn = get_conn()
         cxc_rows = conn.execute("""
-            SELECT cliente, concepto, monto, moneda, status
+            SELECT fecha, cliente, concepto, monto, moneda, status
             FROM gsa_cxc WHERE status='Pendiente'
             ORDER BY fecha DESC
         """).fetchall()
         conn.close()
 
         if cxc_rows:
-            gs_clear("CXC!A5:J200")
             ahora_str = now_local().strftime("%d/%m/%Y")
             filas_cxc = [[
-                ahora_str, r['cliente'], r['concepto'],
+                r['fecha'] or ahora_str, r['cliente'], r['concepto'],
                 r['monto'], r['moneda'], '', '', '🟡 Esta semana',
                 r['status'], ''
             ] for r in cxc_rows]
-            gs_write("CXC!A5", filas_cxc)
-            reporte.append(f"✅ CXC: {len(cxc_rows)} pendientes")
+            gs_clear("CXC!A5:J200")
+            ok = gs_write("CXC!A5", filas_cxc)
+            reporte.append(f"✅ CXC: {len(cxc_rows)} pendientes" if ok else "❌ CXC falló")
         else:
             reporte.append("⚠️ Sin CXC pendientes")
+    except Exception as e:
+        reporte.append(f"❌ CXC error: {e}")
 
-        # ── 5. CXP desde gsa_cxp ──
+    # ── 5. CXP ──
+    try:
         conn = get_conn()
         cxp_rows = conn.execute("""
-            SELECT acreedor, concepto, monto, moneda, status
+            SELECT fecha, acreedor, concepto, monto, moneda, status
             FROM gsa_cxp WHERE status='Pendiente'
             ORDER BY fecha DESC
         """).fetchall()
         conn.close()
 
         if cxp_rows:
-            gs_clear("CXP!A5:J200")
             ahora_str = now_local().strftime("%d/%m/%Y")
             filas_cxp = [[
-                ahora_str, r['acreedor'], r['concepto'],
+                r['fecha'] or ahora_str, r['acreedor'], r['concepto'],
                 r['monto'], r['moneda'], '', '', '🟡 Esta semana',
                 r['status'], ''
             ] for r in cxp_rows]
-            gs_write("CXP!A5", filas_cxp)
-            reporte.append(f"✅ CXP: {len(cxp_rows)} pendientes")
+            gs_clear("CXP!A5:J200")
+            ok = gs_write("CXP!A5", filas_cxp)
+            reporte.append(f"✅ CXP: {len(cxp_rows)} pendientes" if ok else "❌ CXP falló")
         else:
             reporte.append("⚠️ Sin CXP pendientes")
+    except Exception as e:
+        reporte.append(f"❌ CXP error: {e}")
 
-        # ── 6. GASTOS desde gastos ──
+    # ── 6. GASTOS ──
+    try:
         conn = get_conn()
         gastos = conn.execute("""
             SELECT fecha, categoria, descripcion, monto, moneda, comprobante
             FROM gastos ORDER BY fecha
         """).fetchall()
         conn.close()
-
         if gastos:
-            gs_clear("GASTOS!A6:H300")
             filas_g = [[
                 r['fecha'], r['categoria'], r['descripcion'],
                 r['monto'], r['moneda'], '', r['comprobante'] or '', ''
             ] for r in gastos]
-            gs_write("GASTOS!A6", filas_g)
-            reporte.append(f"✅ GASTOS: {len(gastos)} registros")
+            gs_clear("GASTOS!A6:H300")
+            ok = gs_write("GASTOS!A6", filas_g)
+            reporte.append(f"✅ GASTOS: {len(gastos)} registros" if ok else "❌ GASTOS falló")
+    except Exception as e:
+        reporte.append(f"❌ GASTOS error: {e}")
 
-        # ── 7. CLIENTES ──
+    # ── 7. CLIENTES ──
+    try:
         conn = get_conn()
         clientes = conn.execute("""
             SELECT nombre, telefono, fecha_registro, ultima_operacion,
@@ -582,21 +619,17 @@ def gs_sync_inicial():
             FROM clientes ORDER BY volumen_usdt DESC
         """).fetchall()
         conn.close()
-
         if clientes:
-            gs_clear("CLIENTES!A5:J300")
             filas_cl = [[
                 r['nombre'], r['telefono'] or '', '', r['fecha_registro'],
                 r['ultima_operacion'], r['operaciones_total'],
                 r['volumen_usdt'], '', 'Activo', ''
             ] for r in clientes]
-            gs_write("CLIENTES!A5", filas_cl)
-            reporte.append(f"✅ CLIENTES: {len(clientes)} registros")
-
+            gs_clear("CLIENTES!A5:J300")
+            ok = gs_write("CLIENTES!A5", filas_cl)
+            reporte.append(f"✅ CLIENTES: {len(clientes)} registros" if ok else "❌ CLIENTES falló")
     except Exception as e:
-        import traceback
-        reporte.append(f"❌ Error: {e}")
-        print(f"gs_sync_inicial error: {traceback.format_exc()}")
+        reporte.append(f"❌ CLIENTES error: {e}")
 
     return "\n".join(reporte)
 
@@ -3632,8 +3665,13 @@ def procesar(chat_id, texto):
     elif cmd == '/gssync':
         send(chat_id, "⏳ Sincronizando Google Sheets desde base de datos...\nEsto puede tomar 30-60 segundos.")
         def _sync_gs():
-            reporte = gs_sync_inicial()
-            send(chat_id, f"📊 *SINCRONIZACIÓN COMPLETADA*\n\n{reporte}")
+            try:
+                reporte = gs_sync_inicial()
+                send(chat_id, f"📊 *SINCRONIZACIÓN COMPLETADA*\n\n{reporte}")
+            except Exception as _e:
+                import traceback
+                print(f"gssync thread error: {traceback.format_exc()}")
+                send(chat_id, f"❌ Error en sincronización: {_e}")
         import threading
         threading.Thread(target=_sync_gs, daemon=True).start()
 
