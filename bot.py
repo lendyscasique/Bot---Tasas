@@ -21,6 +21,15 @@ import threading
 import json
 from collections import defaultdict
 
+from pricing_gsa import (
+    MARGEN_RECOMENDADO, MARGEN_PREFERENCIAL, MARGEN_CAPTACION,
+    UTILIDAD_MINIMA_COP, COMISION_REFERIDO, COMISION_CORRESPONSAL,
+    COMISION_COMPRA_COP, FEE_CLP_USDT as PRICING_FEE_CLP_USDT,
+    FEE_USDT_BS as PRICING_FEE_USDT_BS, producir_bs_desde_clp,
+    calcular_capacidad_cop, calcular_niveles_tasa, evaluar_tasa_clp_cop,
+    calcular_bs_cop_requerida, comparar_western,
+)
+
 # ══════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN
 # ══════════════════════════════════════════════════════════════════════
@@ -2249,6 +2258,11 @@ def construir_mensaje(d, es_especial=False):
     if d.get('dolar_obs'):   m += f"🇨🇱  *Dólar Observado*\n      `{fmt(d['dolar_obs'])} CLP`\n\n"
     if d.get('western'):     m += f"🌍  *Western Unión*\n      `{fmt(d['western'],4)} CLP/COP`\n\n"
     else:                    m += f"🌍  *Western Unión*\n      _Envía /western TASA_\n\n"
+    bscop_ref = get_bscop_referencia()
+    if bscop_ref:
+        m += f"🇻🇪➡️🇨🇴  *Referencia compra BS→COP*\n      `{bscop_ref:.4f} COP/Bs`\n      _Configurable con /bscop_\n\n"
+    else:
+        m += "🇻🇪➡️🇨🇴  *Referencia compra BS→COP*\n      _Envía /bscop TASA_\n\n"
 
     # GSA CAMBIOS — organizado por categorías
     m += f"━━━━━━━━━━━━━━━━━━━━\n💱 *GSA CAMBIOS*\n_Calculado con {mejor}_\n\n"
@@ -2258,8 +2272,8 @@ def construir_mensaje(d, es_especial=False):
     if d.get('tasa_gsa_clp_bs'):
         m += f"🇨🇱➡️🇻🇪  CLP → Bs      `{fmt(d['tasa_gsa_clp_bs'],6)}`\n"
         m += f"🇻🇪➡️🇨🇱  Bs → CLP      `{fmt(d['tasa_gsa_bs_clp'],6)}`\n"
-    if d.get('tasa_gsa_clp_cop'):
-        m += f"🇨🇱➡️🇨🇴  CLP → COP     `{fmt(d['tasa_gsa_clp_cop'],4)}`\n"
+    m += "🇨🇱➡️🇨🇴  CLP → COP     `Motor Pricing V1 — usar /sim`\n"
+    if d.get('tasa_gsa_cop_clp'):
         m += f"🇨🇴➡️🇨🇱  COP → CLP     `{fmt(d['tasa_gsa_cop_clp'],4)}`\n"
     if d.get('dolar_obs'):
         m += f"🇨🇱➡️🇺🇸  CLP → USD     `{fmt(d['dolar_obs']+SPREAD_CLP)} CLP`\n"
@@ -2273,11 +2287,10 @@ def construir_mensaje(d, es_especial=False):
         tasa_bs_usd = (d.get('ban_bs_compra',0) or 0) - MARGEN_BS
         m += f"🇺🇸➡️🇻🇪  USD → Bs      `{fmt(tasa_usd_bs,2)} Bs`\n"
         m += f"🇻🇪➡️🇺🇸  Bs → USD      `{fmt(tasa_bs_usd,2)} Bs`\n"
-    if d.get('tasa_gsa_cop_bs'):
-        # COP→Bs: cliente da COP y recibe Bs → usa tasa bs_cop (más alta)
-        # Bs→COP: cliente da Bs y recibe COP → usa tasa cop_bs (más baja)
+    if d.get('tasa_gsa_bs_cop'):
         m += f"🇨🇴➡️🇻🇪  COP → Bs      `{fmt(d['tasa_gsa_bs_cop'],4)}`\n"
-        m += f"🇻🇪➡️🇨🇴  Bs → COP      `{fmt(d['tasa_gsa_cop_bs'],4)}`\n"
+    if bscop_ref:
+        m += f"🇻🇪➡️🇨🇴  Bs → COP      `Referencia compra {bscop_ref:.4f}`\n"
     m += "\n"
 
     # Compra/Venta Pesos Colombianos
@@ -2290,8 +2303,6 @@ def construir_mensaje(d, es_especial=False):
     # Límites
     m += f"━━━━━━━━━━━━━━━━━━━━\n📐 *LÍMITES OPERATIVOS*\n\n"
     if d.get('limite_clp_bs'):  m += f"🔴  *Límite CLP/Bs*\n      `{fmt(d['limite_clp_bs'],6)}`\n\n"
-    if d.get('limite_clp_cop'): m += f"🔴  *Límite CLP/COP*\n      `{fmt(d['limite_clp_cop'],4)}`\n\n"
-    if d.get('limite_bs_cop'):  m += f"🔴  *Límite Bs/COP*\n      `{fmt(d['limite_bs_cop'],4)}`\n\n"
     m += f"━━━━━━━━━━━━━━━━━━━━\n🏦 *Banco recomendado: {mejor}*"
     return m
 
@@ -3128,6 +3139,21 @@ def procesar(chat_id, texto):
             except: send(chat_id,"Uso: /western 0.0042")
         else: send(chat_id,"Uso: `/western 0.0042`")
 
+
+    elif cmd=='/bscop':
+        if len(partes)>=2:
+            try:
+                tasa_bscop=float(partes[1].replace(',','.'))
+                if tasa_bscop <= 0: raise ValueError('tasa inválida')
+                set_config('bscop_actual', str(tasa_bscop))
+                send(chat_id, f"✅ Referencia BS→COP guardada: `{tasa_bscop:.4f}`\n_Esta tasa alimenta el Motor Pricing CLP→COP V1 y no depende de Western._")
+            except Exception:
+                send(chat_id, "Uso: `/bscop 3.35`")
+        else:
+            tasa_bscop=get_bscop_referencia()
+            if tasa_bscop: send(chat_id, f"📌 Referencia BS→COP actual: `{tasa_bscop:.4f}`")
+            else: send(chat_id, "⚠️ No hay referencia BS→COP. Usa: `/bscop 3.35`")
+
     elif cmd=='/saldo_binance':
         if len(partes) >= 2:
             try:
@@ -3244,6 +3270,20 @@ def procesar(chat_id, texto):
 
                 if tipo_op not in TIPOS_OP:
                     send(chat_id, f"❌ Tipo no válido: `{tipo_op}`\nUsa /simular para ver los tipos")
+                elif tipo_op == 'CLP→COP':
+                    tasa_bs_cop = _float_campo(campos.get('TASA_BS_COP','0'), 0)
+                    tasa_cliente_manual = _float_campo(campos.get('TASA_CLIENTE','0'), 0)
+                    avance_corresponsal = float(campos.get('AVANCE_CORRESPONSAL','0').replace('.','').replace(',',''))
+                    resultado, error = calcular_cotizacion_clp_cop_v1(
+                        monto_clp=monto, cliente=cliente, metodo=metodo, entrega=entrega,
+                        tasa_bs_cop=tasa_bs_cop, tasa_cliente_manual=tasa_cliente_manual,
+                        referido=referido, delivery_cop=monto_delivery,
+                        avance_corresponsal_cop=avance_corresponsal, notas=notas)
+                    if error:
+                        send(chat_id, f"⚠️ {error}")
+                    else:
+                        send(chat_id, msg_cotizacion_clp_cop_v1(resultado))
+                        send(chat_id, "📤 *MENSAJE PARA EL CLIENTE:*\n" + msg_cliente_clp_cop_v1(resultado))
                 else:
                     resultado, error = calcular_cotizacion_v2(
                         tipo_op, monto, cliente, metodo,
@@ -3254,9 +3294,7 @@ def procesar(chat_id, texto):
                         send(chat_id, f"⚠️ {error}")
                     else:
                         resultado['entrega'] = entrega
-                        # Mensaje 1: operador
                         send(chat_id, msg_cotizacion(resultado))
-                        # Mensaje 2: cliente
                         send(chat_id, "📤 *MENSAJE PARA EL CLIENTE:*\n" + msg_cliente(resultado))
             except Exception as e:
                 send(chat_id, f"❌ Error: {e}\nUsa /simular para ver el formato")
@@ -3819,7 +3857,7 @@ def procesar(chat_id, texto):
         send(chat_id,"""🤖 *GSA CAMBIOS v6.0 — COMANDOS*
 
 *📊 TASAS*
-/tasas | /western TASA | /limites
+/tasas | /western TASA | /bscop TASA | /limites
 
 *📡 MERCADO EN VIVO*
 /mercado | /patron bs | /patron hoy | /patron semana
@@ -7254,9 +7292,10 @@ def calcular_simulacion(tipo_op, monto, cliente, corresponsal, t):
     return res
 
 def msg_simular_ayuda():
-    """Plantilla del simulador — COM-REFERIDO es automático."""
+    """Plantilla del simulador. CLP→COP usa Motor Pricing GSA V1.0."""
     m  = "💱 *SIMULADOR DE COTIZACIÓN*\n"
     m += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    m += "Para *CLP→COP*, primero puedes guardar la referencia de compra con `/bscop 3.35`\n\n"
     m += "Copia, completa y envía:\n\n"
     m += "`/sim`\n"
     m += "`TIPO: CLP-COP`\n"
@@ -7264,27 +7303,156 @@ def msg_simular_ayuda():
     m += "`CLIENTE: Nombre`\n"
     m += "`METODO: Transferencia`\n"
     m += "`ENTREGA: Transferencia`\n"
-    m += "`CORRESPONSAL: Bancolombia`\n"
-    m += "`TITULAR: Nataly Florez`\n"
-    m += "`COM-CORRESPONSAL: 2.5`\n"
+    m += "`TASA-BS-COP: 3.35`\n"
+    m += "`TASA-CLIENTE: 0`\n"
     m += "`REFERIDO: No`\n"
     m += "`DELIVERY: No`\n"
     m += "`MONTO-DELIVERY: 0`\n"
+    m += "`AVANCE-CORRESPONSAL: 0`\n"
     m += "`NOTAS: -`\n\n"
-    m += "*METODO* → cómo el cliente te paga a ti\n"
-    m += "*ENTREGA* → cómo tú le entregas al cliente\n"
-    m += "`Transferencia / Efectivo / Pago Móvil`\n\n"
-    m += "*Comisión referido automática:*\n"
-    m += "`CLP-COP → 3%` | `COP-COP → 1.5%`\n"
-    m += "_Solo escribe el nombre del referido_\n\n"
-    m += "*Tipos:*\n"
-    m += "`CLP-BS  BS-CLP  CLP-COP  COP-CLP`\n"
-    m += "`COP-BS  BS-COP  CLP-USDT USDT-CLP`\n"
-    m += "`BS-USDT USDT-BS CLP-USD  USD-CLP`\n"
-    m += "`COP-COP (Western) BS-USDC USDC-BS`\n\n"
-    m += "*Corresponsal:* Bancolombia / Nequi / Caja-COP / Caja-USD / Nuevo"
+    m += "*CLP→COP V1:*\n"
+    m += "• `TASA-BS-COP` puede omitirse si ya usaste `/bscop`.\n"
+    m += "• `TASA-CLIENTE: 0` usa la tasa recomendada 7%.\n"
+    m += "• Si escribes una tasa cliente, el Bot evalúa esa tasa.\n"
+    m += "• `REFERIDO` aplica 3% solo cuando no sea No.\n"
+    m += "• `MONTO-DELIVERY` es costo de GSA.\n"
+    m += "• `AVANCE-CORRESPONSAL` cobra 5% solo sobre el monto adelantado.\n\n"
+    m += "*Otros tipos:* mantienen su lógica actual.\n"
+    m += "`CLP-BS  BS-CLP  COP-CLP  COP-BS  BS-COP`\n"
+    m += "`CLP-USDT USDT-CLP BS-USDT USDT-BS CLP-USD USD-CLP`\n"
     return m
 
+
+
+def _float_campo(valor, default=0.0):
+    if valor is None or str(valor).strip() == '':
+        return float(default)
+    txt = str(valor).strip().replace(' ', '')
+    if ',' in txt and '.' not in txt:
+        txt = txt.replace(',', '.')
+    return float(txt)
+
+
+def get_bscop_referencia():
+    try:
+        v = get_config('bscop_actual', '')
+        return float(v) if v else 0.0
+    except Exception:
+        return 0.0
+
+
+def calcular_cotizacion_clp_cop_v1(
+    monto_clp, cliente, metodo, entrega,
+    tasa_bs_cop=0.0, tasa_cliente_manual=0.0,
+    referido='No', delivery_cop=0.0,
+    avance_corresponsal_cop=0.0, notas='-'
+):
+    """Motor referencial V1.0 para CLP→COP, independiente de Western e inventario."""
+    t = get_ultima_tasa()
+    if not t:
+        return None, "Sin tasas de mercado disponibles. Espera el próximo ciclo de tasas."
+
+    tasa_clp_usdt = t.get('clp_compra', 0) or t.get('dolar_obs', 0) or 0
+    ban_v = t.get('ban_bs_venta', 0) or 0
+    mer_v = t.get('mer_bs_venta', 0) or 0
+    tasa_usdt_bs = max(ban_v, mer_v)
+    if tasa_clp_usdt <= 0:
+        return None, "No hay referencia CLP→USDT disponible."
+    if tasa_usdt_bs <= 0:
+        return None, "No hay referencia USDT→BS disponible."
+
+    q_bs_cop = float(tasa_bs_cop or 0) or get_bscop_referencia()
+    if q_bs_cop <= 0:
+        return None, "Falta tasa BS→COP. Usa /bscop TASA o agrega TASA-BS-COP en /sim."
+
+    referido_activo = str(referido).strip().lower() not in ('no', '-', 'ninguno', '')
+    delivery_cop = max(float(delivery_cop or 0), 0.0)
+    avance_corresponsal_cop = max(float(avance_corresponsal_cop or 0), 0.0)
+
+    ciclo = producir_bs_desde_clp(
+        monto_clp=float(monto_clp), tasa_clp_usdt=tasa_clp_usdt,
+        tasa_usdt_bs=tasa_usdt_bs, fee_clp_usdt=PRICING_FEE_CLP_USDT,
+        fee_usdt_bs=PRICING_FEE_USDT_BS,
+    )
+    cop_potenciales = calcular_capacidad_cop(ciclo['bs_netos'], q_bs_cop)
+    niveles = calcular_niveles_tasa(
+        float(monto_clp), cop_potenciales, referido=referido_activo,
+        delivery_cop=delivery_cop, avance_corresponsal_cop=avance_corresponsal_cop,
+        utilidad_minima_cop=UTILIDAD_MINIMA_COP,
+    )
+
+    tasa_eval = float(tasa_cliente_manual or 0)
+    nivel_usado = 'MANUAL' if tasa_eval > 0 else 'RECOMENDADA 7%'
+    if tasa_eval <= 0:
+        tasa_eval = niveles['recomendada']['tasa']
+
+    evaluacion = evaluar_tasa_clp_cop(
+        float(monto_clp), tasa_eval, cop_potenciales, referido=referido_activo,
+        delivery_cop=delivery_cop, avance_corresponsal_cop=avance_corresponsal_cop,
+        utilidad_minima_cop=UTILIDAD_MINIMA_COP,
+    )
+
+    western = t.get('western', 0) or 0
+    comparacion = comparar_western(float(monto_clp), tasa_eval, western if western > 0 else None)
+    inverso = {}
+    for nombre, margen in (('equilibrio',0.0),('captacion',MARGEN_CAPTACION),('preferencial',MARGEN_PREFERENCIAL),('recomendada',MARGEN_RECOMENDADO)):
+        inverso[nombre] = calcular_bs_cop_requerida(
+            ciclo['bs_netos'], float(monto_clp), tasa_eval, margen,
+            referido=referido_activo, delivery_cop=delivery_cop,
+            avance_corresponsal_cop=avance_corresponsal_cop,
+        )
+
+    return {
+        'pricing_v1': True, 'tipo_op':'CLP→COP', 'cliente':cliente,
+        'metodo':metodo, 'entrega':entrega, 'notas':notas,
+        'monto_entrada':float(monto_clp), 'mon_entrada':'CLP', 'mon_salida':'COP',
+        'tasa_cliente':round(tasa_eval,6), 'monto_salida':round(evaluacion['cop_cliente'],2),
+        'nivel_usado':nivel_usado, 'referido':referido, 'referido_activo':referido_activo,
+        'monto_delivery':delivery_cop, 'delivery_activo':delivery_cop>0,
+        'avance_corresponsal_cop':avance_corresponsal_cop, 'tasa_bs_cop':q_bs_cop,
+        'tasa_clp_usdt':tasa_clp_usdt, 'tasa_usdt_bs':tasa_usdt_bs,
+        'ciclo':ciclo, 'cop_potenciales':cop_potenciales, 'niveles':niveles,
+        'evaluacion':evaluacion, 'western_cmp':comparacion, 'bs_cop_requerida':inverso,
+    }, None
+
+
+def msg_cotizacion_clp_cop_v1(r):
+    ev=r['evaluacion']; niv=r['niveles']; cmpw=r.get('western_cmp')
+    etiquetas={'RECOMENDADA':'🟢 RECOMENDADA','PREFERENCIAL':'🔵 PREFERENCIAL','CAPTACION':'🟠 CAPTACIÓN','FUERA_POLITICA':'⚠️ FUERA DE POLÍTICA','EQUILIBRIO':'⚫ EQUILIBRIO','PERDIDA':'🔴 PÉRDIDA'}
+    m="💱 *GSA — COTIZACIÓN CLP→COP V1*\n━━━━━━━━━━━━━━━━━━━━\n"
+    m+=f"👤 Cliente: `{r['cliente']}`\n📥 Monto: `{r['monto_entrada']:,.0f} CLP`\n\n"
+    m+="*ECONOMÍA REFERENCIAL*\n"
+    m+=f"CLP→USDT: `{r['tasa_clp_usdt']:,.2f}`\nUSDT→BS: `{r['tasa_usdt_bs']:,.2f}`\nBS→COP compra: `{r['tasa_bs_cop']:.4f}`\n"
+    m+=f"BS netos proyectados: `{r['ciclo']['bs_netos']:,.2f} Bs`\nCapacidad COP: `{r['cop_potenciales']:,.0f} COP`\n\n"
+    m+="*TASAS GSA*\n"
+    m+=f"🟢 Recomendada 7%: `{niv['recomendada']['tasa']:.4f}`\n🔵 Preferencial 5%: `{niv['preferencial']['tasa']:.4f}`\n"
+    cap_warn='' if niv['captacion']['cumple_utilidad_minima'] else ' ⚠️ < mínimo COP'
+    m+=f"🟠 Captación 3%: `{niv['captacion']['tasa']:.4f}`{cap_warn}\n⚫ Equilibrio: `{niv['equilibrio']['tasa']:.4f}`\n\n"
+    m+="*TASA EVALUADA*\n"
+    m+=f"Tasa: `{r['tasa_cliente']:.4f}` ({r['nivel_usado']})\nCliente recibe: `{ev['cop_cliente']:,.0f} COP`\n"
+    m+=f"Utilidad proyectada: `{ev['utilidad_cop']:,.0f} COP`\nRentabilidad: `{ev['rentabilidad_pct']:.2f}%`\nEstado: *{etiquetas.get(ev['clasificacion'],ev['clasificacion'])}*\n\n"
+    m+="*COSTOS*\n"
+    m+=f"Referido: `{'Sí — 3%' if r['referido_activo'] else 'No'}`"
+    if r['referido_activo']: m+=f" → `{ev['comision_referido_cop']:,.0f} COP`"
+    m+="\n"
+    m+=f"Delivery GSA: `{ev['delivery_cop']:,.0f} COP`\nAvance corresponsal: `{ev['avance_corresponsal_cop']:,.0f} COP`\nCosto corresponsal 5%: `{ev['comision_corresponsal_cop']:,.0f} COP`\n\n"
+    if cmpw:
+        m+="*WESTERN — BENCHMARK*\n"
+        m+=f"Western: `{cmpw['western']:.4f}`\nGSA: `{cmpw['tasa_gsa']:.4f}`\nBrecha tasa: `{cmpw['brecha_tasa']:+.4f}`\nDiferencia cliente: `{cmpw['brecha_cop']:,.0f} COP`\n\n"
+    else:
+        m+="*WESTERN — BENCHMARK*\n⚠️ Sin referencia; la cotización GSA sigue siendo válida.\n\n"
+    inv=r['bs_cop_requerida']
+    m+="*BS→COP REQUERIDA PARA ESTA TASA*\n"
+    m+=f"Equilibrio: `{inv['equilibrio']:.4f}`\nCaptación 3%: `{inv['captacion']:.4f}`\nPreferencial 5%: `{inv['preferencial']:.4f}`\nRecomendada 7%: `{inv['recomendada']:.4f}`\n"
+    return m
+
+
+def msg_cliente_clp_cop_v1(r):
+    return ("💱 *GSA Cambios*\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"📥 Entregas: `{r['monto_entrada']:,.0f} CLP`\n"
+            f"📤 Recibes: `{r['monto_salida']:,.0f} COP`\n"
+            f"📊 Tasa: `{r['tasa_cliente']:.4f}`\n━━━━━━━━━━━━━━━━━━━━\n"
+            "_Cotización sujeta a confirmación al momento de realizar la operación._")
 
 
 def tasa_cop_bs_por_tramo(monto_cop, tasa_base):
